@@ -1,0 +1,42 @@
+$begin 'ConnectionParameters'
+	DesktopProcessID=18252
+	DesktopProcessPath='C:\\Program Files\\AnsysEM\\v242\\v242\\Win64\\ansysedt.exe'
+	LaunchedByWB=false
+	GRPCPort=62896
+	$begin 'DesktopStubBlock'
+		$begin 'CommDetails'
+			TransportType=1
+			IPAddress='192.168.85.1'
+			ListenPort='62904'
+			IPAddressVector[2: '192.168.163.1', '192.168.2.119']
+		$end 'CommDetails'
+		$begin 'Marshall'
+			InstanceID=503
+			ProcID=18252
+			InterfaceID=1
+			FactoryIntID='DesktopInterfaceForWBProxyStubFactory'
+		$end 'Marshall'
+	$end 'DesktopStubBlock'
+	$begin 'DesktopBackgroundObjStubBlock'
+		$begin 'CommDetails'
+			TransportType=1
+			IPAddress='192.168.85.1'
+			ListenPort='62904'
+			IPAddressVector[2: '192.168.163.1', '192.168.2.119']
+		$end 'CommDetails'
+		$begin 'Marshall'
+			InstanceID=505
+			ProcID=18252
+			InterfaceID=2
+			FactoryIntID='DesktopInterfaceForWBProxyStubFactory'
+		$end 'Marshall'
+	$end 'DesktopBackgroundObjStubBlock'
+	$begin 'WebClientBlock'
+		Url='http://RF01:46325/?server=ws://RF01:45813&token=a3ca20e0-d874-49ac-ea06-256c528a014d&startTab=monitor/graph'
+		SecureUrl='https://RF01:46581/?server=wss://RF01:46069&token=a3ca20e0-d874-49ac-ea06-256c528a014d&startTab=monitor/graph'
+		WsHost='RF01'
+		WsPort=45813
+		WssPort=46069
+		Token='a3ca20e0-d874-49ac-ea06-256c528a014d'
+	$end 'WebClientBlock'
+$end 'ConnectionParameters'
