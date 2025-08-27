@@ -8,23 +8,27 @@ import logging
 from ansys.aedt.core import Hfss
 
 # ----------------------------- Configurações ---------------------------------
+# Parâmetros Físicos da Antena
 AEDT_VERSION = "2024.2"
-FREQ_GHZ = 2.4
-SUBSTRATE_HEIGHT_MM = 1.57
-EPS_R = 4.4
-COPPER_THICK_MM = 0.035
+FREQ_GHZ = 2.4                  # Frequência de ressonância alvo (GHz)
+SUBSTRATE_MATERIAL = "FR4_epoxy"  # Material do dielétrico
+EPS_R = 4.4                     # Constante dielétrica relativa do substrato
+SUBSTRATE_HEIGHT_MM = 1.57        # Altura (espessura) do substrato em mm
+COPPER_THICK_MM = 0.035           # Espessura do cobre
 
-PIN_RADIUS_MM = 0.6
-PIN_GAP_MM = 0.5
-FEED_OFFSET_X_MM = 8.0
+# Parâmetros da Alimentação Coaxial (Probe Feed)
+PIN_RADIUS_MM = 0.6               # Raio do pino condutor interno
+PIN_GAP_MM = 0.5                  # Espaçamento entre o pino e o plano de terra
+FEED_OFFSET_X_MM = 8.0            # Deslocamento do pino a partir do centro (eixo Y)
 
+# Configurações da Simulação
+SETUP_NAME = "MainSetup"
+SWEEP_NAME = "FastSweep"
+DESIGN_NAME = "Perfect_Patch_Antenna"
+S_PARAM_EXPR = "db(S(1,1))"
 SWEEP_START_GHZ = 1.5
 SWEEP_STOP_GHZ = 3.5
 SWEEP_POINTS = 101
-SWEEP_NAME = "FastSweep"
-SETUP_NAME = "MainSetup"
-DESIGN_NAME = "PatchAntenna_DirectHFSS"
-S_PARAM_EXPR = "db(S(1,1))"
 
 # ---------------------- Diretórios e Logging ---------------------------
 try:
@@ -48,16 +52,37 @@ log = logging.getLogger("antenna_suite")
 
 # ---------------------- Fórmulas e Utilidades ---------------------
 def design_patch_dimensions(f0_GHz: float, eps_r: float, h_mm: float):
-    c = 299792458.0; f0 = f0_GHz * 1e9; h = h_mm / 1000.0
+    """
+    Calcula as dimensões de um patch retangular usando o procedimento de projeto
+    detalhado na Seção 3.1 do tratado de referência.
+    Retorna (Largura_mm, Comprimento_mm).
+    """
+    log.info("Iniciando cálculo de dimensões teóricas do patch...")
+    c = 299792458.0
+    f0 = f0_GHz * 1e9
+    h = h_mm / 1000.0
+
+    # Passo 1: Calcular a Largura (W) [cite: 27]
     W = (c / (2.0 * f0)) * math.sqrt(2.0 / (eps_r + 1.0))
-    eps_eff = ((eps_r + 1.0) / 2.0) + ((eps_r - 1.0) / 2.0) * (1.0 + 12.0 * h / W) ** -0.5
-    dL_over_h = 0.412 * ((eps_eff + 0.3) * (W / h + 0.264)) / ((eps_eff - 0.258) * (W / h + 0.8))
-    dL = dL_over_h * h; L_eff = c / (2.0 * f0 * math.sqrt(eps_eff)); L = L_eff - 2.0 * dL
+
+    # Passo 2: Calcular a Constante Dielétrica Efetiva (eps_reff) [cite: 33]
+    eps_reff = ((eps_r + 1.0) / 2.0) + ((eps_r - 1.0) / 2.0) * (1.0 + 12.0 * h / W) ** -0.5
+
+    # Passo 3: Calcular a Extensão do Comprimento (dL) [cite: 33]
+    dL_over_h = 0.412 * ((eps_reff + 0.3) * (W / h + 0.264)) / ((eps_reff - 0.258) * (W / h + 0.8))
+    dL = dL_over_h * h
+
+    # Passo 4: Calcular o Comprimento Efetivo (L_eff) [cite: 33]
+    L_eff = c / (2.0 * f0 * math.sqrt(eps_reff))
+
+    # Passo 5: Calcular o Comprimento Físico (L) 
+    L = L_eff - 2.0 * dL
+
     return W * 1000.0, L * 1000.0
 
 def clean_previous_project(project_path: str):
     if os.path.exists(project_path):
-        log.info("Removendo projeto antigo...")
+        log.info(f"Removendo projeto antigo em {project_path}...")
         try: os.remove(project_path)
         except Exception as e: log.warning(f"Não foi possível remover {project_path}: {e}")
     lock_file = project_path + ".lock"
@@ -69,11 +94,11 @@ def clean_previous_project(project_path: str):
         try: shutil.rmtree(results_folder)
         except Exception as e: log.warning(f"Não foi possível remover {results_folder}: {e}")
 
-# ------------------------------- Fluxo principal -----------------------------
+# ------------------------------- Fluxo Principal -----------------------------
 def main():
-    log.info("========== Antenna Automation (Direct HFSS Modeling) ==========")
+    log.info("========== Antenna Automation (vFinal) ==========")
     PATCH_WIDTH_MM, PATCH_LENGTH_MM = design_patch_dimensions(FREQ_GHZ, EPS_R, SUBSTRATE_HEIGHT_MM)
-    log.info(f"[Analítico] W≈{PATCH_WIDTH_MM:.2f} mm, L≈{PATCH_LENGTH_MM:.2f} mm")
+    log.info(f"[Teórico] Dimensões calculadas: W={PATCH_WIDTH_MM:.2f} mm, L={PATCH_LENGTH_MM:.2f} mm")
 
     clean_previous_project(PROJECT_PATH)
 
@@ -85,17 +110,25 @@ def main():
     try:
         hfss.modeler.model_units = "mm"
         
-        log.info("Criando geometria...")
+        # Passo 6: Calcular dimensões do plano de terra e substrato 
+        gnd_extension = 6 * SUBSTRATE_HEIGHT_MM
+        gnd_w = PATCH_WIDTH_MM + 2 * gnd_extension
+        gnd_l = PATCH_LENGTH_MM + 2 * gnd_extension
+        
+        log.info("Criando geometria no HFSS...")
+        # Substrato
         substrate = hfss.modeler.create_box(
-            origin=[f"{-PATCH_WIDTH_MM*1.5}", f"{-PATCH_LENGTH_MM*1.5}", "0"],
-            sizes=[f"{PATCH_WIDTH_MM*3}", f"{PATCH_LENGTH_MM*3}", f"{-SUBSTRATE_HEIGHT_MM}"],
-            name="Substrate", material="FR4_epoxy"
+            origin=[f"{-gnd_w/2}", f"{-gnd_l/2}", "0"],
+            sizes=[f"{gnd_w}", f"{gnd_l}", f"{-SUBSTRATE_HEIGHT_MM}"],
+            name="Substrate", material=SUBSTRATE_MATERIAL
         )
+        # Plano de Terra
         gnd = hfss.modeler.create_rectangle(
-            origin=[f"{-PATCH_WIDTH_MM*1.5}", f"{-PATCH_LENGTH_MM*1.5}", f"{-SUBSTRATE_HEIGHT_MM}"],
-            sizes=[f"{PATCH_WIDTH_MM*3}", f"{PATCH_LENGTH_MM*3}"],
+            origin=[f"{-gnd_w/2}", f"{-gnd_l/2}", f"{-SUBSTRATE_HEIGHT_MM}"],
+            sizes=[f"{gnd_w}", f"{gnd_l}"],
             name="Ground", orientation="Z"
         )
+        # Patch
         patch = hfss.modeler.create_box(
             origin=[f"{-PATCH_WIDTH_MM/2}", f"{-PATCH_LENGTH_MM/2}", "0"],
             sizes=[f"{PATCH_WIDTH_MM}", f"{PATCH_LENGTH_MM}", f"{COPPER_THICK_MM}"],
@@ -112,10 +145,8 @@ def main():
         
         pin = hfss.modeler.create_cylinder(
             origin=[f"{FEED_OFFSET_X_MM}", "0", f"{-SUBSTRATE_HEIGHT_MM}"],
-            radius=PIN_RADIUS_MM,
-            height=f"{SUBSTRATE_HEIGHT_MM}",
-            name="Pin", material="copper",
-            orientation="Z"
+            radius=PIN_RADIUS_MM, height=f"{SUBSTRATE_HEIGHT_MM}",
+            name="Pin", material="copper", orientation="Z"
         )
         
         port_cap = hfss.modeler.create_circle(
@@ -129,12 +160,10 @@ def main():
         log.info("Atribuindo contornos e excitação...")
         hfss.assign_perfecte_to_sheets([gnd.name, patch.name])
         
-        # CORREÇÃO FINAL: Nome do método alterado para 'wave_port'.
         hfss.wave_port(
-            sheet=port_cap,
-            port_name="1",
-            integration_line_start=[f"{FEED_OFFSET_X_MM}", f"{-(PIN_RADIUS_MM)}", f"{-SUBSTRATE_HEIGHT_MM}"],
-            integration_line_stop=[f"{FEED_OFFSET_X_MM}", f"{(PIN_RADIUS_MM)}", f"{-SUBSTRATE_HEIGHT_MM}"]
+            faceid=port_cap.faces[0].id, port_name="1",
+            integration_line_start=[f"{FEED_OFFSET_X_MM}", f"{-PIN_RADIUS_MM}", f"{-SUBSTRATE_HEIGHT_MM}"],
+            integration_line_stop=[f"{FEED_OFFSET_X_MM}", f"{PIN_RADIUS_MM}", f"{-SUBSTRATE_HEIGHT_MM}"]
         )
         
         region = hfss.modeler.create_region(pad_percent=300)
@@ -148,7 +177,7 @@ def main():
             sweep_type="Interpolating", num_of_freq_points=SWEEP_POINTS,
         )
 
-        log.info("Iniciando simulação...")
+        log.info("Iniciando simulação... Este processo pode levar vários minutos.")
         hfss.analyze(setup.name)
         log.info("Simulação finalizada.")
         
