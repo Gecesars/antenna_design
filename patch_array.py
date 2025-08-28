@@ -175,60 +175,74 @@ def add_patch_with_qw(
     """
     Cria:
       - Patch (Wp x Lp) em z=h
-      - Linha λ/4 (Wt x Lq) em z=h (colada no patch)
-      - Linha 50Ω (W50 x Lfeed) em z=h
-      - Porta LUMPED correta em sheet XZ no FINAL da linha 50Ω
-    Tudo como sheets PEC (topo) + GND PEC.
+      - Linha λ/4 (Wt x Lq) em z=h
+      - Feed 50Ω (W50 x Lfeed) em z=h
+      - Porta LUMPED no sheet XZ (face id) tocando GND e topo.
     """
-    # z's
-    z_top = "h"             # topo do substrato (param)
+    z_top = "h"
     z_gnd = "0mm"
     h_tot = "h+tCu"
-
-    # Comprimento de alimentação reto (um pouco além do λ/4)
     Lfeed_mm = max(5.0, 0.15 * p.Lq)
 
-    # ---- TOP: patch + λ/4 + feed 50Ω (sheets no plano XY em z=h) ----
-    # Patch
-    patch = hfss.modeler.create_rectangle(
+    # --- topo ---
+    r_patch = hfss.modeler.create_rectangle(
         origin=[f"{mm_str(cx_mm)}-Wp/2", f"{mm_str(cy_mm)}-Lp/2", z_top],
         sizes=["Wp", "Lp"], orientation="XY", name=f"Patch_{idx}"
     )
-    # λ/4 colada ao lado +Y do patch
-    tline = hfss.modeler.create_rectangle(
+    r_qw = hfss.modeler.create_rectangle(
         origin=[f"{mm_str(cx_mm)}-Wt/2", f"{mm_str(cy_mm)}+Lp/2", z_top],
         sizes=["Wt", "Lq"], orientation="XY", name=f"TLineQW_{idx}"
     )
-    # feed 50 Ω colado ao final da λ/4
-    feed = hfss.modeler.create_rectangle(
+    r_feed = hfss.modeler.create_rectangle(
         origin=[f"{mm_str(cx_mm)}-W50/2", f"{mm_str(cy_mm)}+Lp/2+Lq", z_top],
         sizes=["W50", mm_str(Lfeed_mm)], orientation="XY", name=f"Feed50_{idx}"
     )
 
-    # Unir topo e tornar PEC
-    hfss.modeler.unite([patch, tline, feed])
-    hfss.assign_perfecte_to_sheets([patch.name])  # topo unido vira PEC
+    # Aplique PEC explicitamente em cada um (mais robusto ao unite)
+    hfss.assign_perfecte_to_sheets([r_patch.name, r_qw.name, r_feed.name])
 
-    # ---- Porta lumped no FINAL da linha 50 Ω ----
+    # Una os três; o nome mantido costuma ser o do primeiro
+    hfss.modeler.unite([r_patch, r_qw, r_feed])
+
+    # --- porta ---
     y_port = cy_mm + (p.Lp / 2.0) + p.Lq + Lfeed_mm
-    port_sheet = hfss.modeler.create_rectangle(
+    r_port = hfss.modeler.create_rectangle(
         origin=[f"{mm_str(cx_mm)}-W50/2", mm_str(y_port), z_gnd],
         sizes=["W50", h_tot], orientation="XZ", name=f"PortSheet_{idx}"
     )
 
-    pname = f"P{idx}"
-    lumped_ok = True
-    try:
-        hfss.lumped_port(assignment=port_sheet, reference=None,
-                         impedance=z0_system, renormalize=True, name=pname)
-    except Exception:
-        # fallback para wave port com linha vertical de integração
-        lumped_ok = False
-        xmid = cx_mm
-        int_line = [[mm_str(xmid), mm_str(y_port), "0mm"], [mm_str(xmid), mm_str(y_port), "h+tCu"]]
-        hfss.wave_port(assignment=port_sheet, name=pname, integration_line=int_line)
+    # pegue as faces do sheet e escolha a(s) em y == y_port
+    faces = hfss.modeler.get_object_faces(r_port.name)
+    # função util pra filtrar pela coordenada Y do centro
+    def _face_at_y(fid, y_target):
+        try:
+            c = hfss.modeler.get_face_center(fid)
+            return abs(c[1] - y_target) < 1e-6
+        except Exception:
+            return False
 
-    return pname, lumped_ok
+    cand = [f for f in faces if _face_at_y(f, y_port)]
+    if not cand:  # fallback: use todas (ordem estável)
+        cand = faces[:]
+
+    pname = f"P{idx}"
+    # tente na ordem: primeira face candidata, depois a outra
+    for fid in cand:
+        try:
+            hfss.lumped_port(
+                assignment=fid,         # <<<<<< face id
+                reference="GND",
+                impedance=z0_system,
+                renormalize=True,
+                name=pname
+            )
+            return pname, True
+        except Exception:
+            continue
+
+    # se nada deu, reporte falha mas siga em frente
+    return pname, False
+
 
 
 # ---------------------------------------------------------------------------
