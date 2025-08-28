@@ -1,23 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-HFSS Patch Array — λ/4 Transformer + Portas Lumped Corrigidas
+HFSS Patch Array — λ/4 Transformer + Port Sheet XZ (fix: int-line co-alinhada)
 PyAEDT==0.18.1 | HFSS 2024 R2
-
-Correções aplicadas:
-1. Geometria da porta lumped corrigida: largura = Wt, altura = h
-2. Integration line estendendo do terra até a linha condutora
-3. Posicionamento preciso da porta entre GND e feed pad
 """
 
 from __future__ import annotations
 import os, math, shutil, traceback
-from typing import Tuple, List, Dict, Any
-import tempfile
-
+from typing import Tuple, List
 import customtkinter as ctk
 from ansys.aedt.core import Hfss
 
-# ===================== Configurações Gerais =====================
+# ===================== Config =====================
 AEDT_VERSION = "2024.2"
 UNITS = "mm"
 COPPER_T = 0.035
@@ -29,7 +22,11 @@ PAD_MIN = 1.0
 SETUP_NAME = "OpSetup"
 SWEEP_NAME = "OpFast"
 
-# ===================== Utilidades Eletromag =====================
+# ===================== Utils =====================
+def r6(x: float) -> float:
+    # mesmo número que irá para o sheet e para a int-line
+    return float(f"{x:.6f}")
+
 def c_mm_per_GHz() -> float:
     return 299.792458
 
@@ -77,34 +74,84 @@ def quarter_wave_len_mm(f0_GHz: float, eps_r: float, w_mm: float, h_mm: float) -
 # ===================== Arquivos / Projeto ======================
 def clean_previous(project_path: str):
     if os.path.exists(project_path):
-        try:
-            os.remove(project_path)
-        except Exception:
-            pass
-
+        try: os.remove(project_path)
+        except Exception: pass
     if os.path.exists(project_path + ".lock"):
-        try:
-            os.remove(project_path + ".lock")
-        except Exception:
-            pass
-
+        try: os.remove(project_path + ".lock")
+        except Exception: pass
     res_dir = project_path.replace(".aedt", ".aedtresults")
     if os.path.exists(res_dir):
-        try:
-            shutil.rmtree(res_dir)
-        except Exception:
-            pass
-
-    semaphore_files = [
+        try: shutil.rmtree(res_dir)
+        except Exception: pass
+    for f in [
         os.path.join(os.path.dirname(project_path), ".PatchArray_HFSS.asol_priv.semaphore"),
-        os.path.join(res_dir, ".PatchArray_HFSS.asol_priv.semaphore")
-    ]
-    for sem_file in semaphore_files:
-        if os.path.exists(sem_file):
-            try:
-                os.remove(sem_file)
-            except Exception:
-                pass
+        os.path.join(res_dir, ".PatchArray_HFSS.asol_priv.semaphore"),
+    ]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except Exception: pass
+
+# ===================== Porta: helper =====================
+def _assign_lumped_port_sheet(hfss: Hfss, sheet_name: str, gnd_name: str,
+                              pname: str, x_mm: float, y_mm: float,
+                              z1_mm: float, z2_mm: float, z0_ohm: float) -> None:
+    # padroniza valores para coincidir 1:1 com os usados no sheet
+    x_mm = r6(x_mm)
+    y_mm = r6(y_mm)
+    z1_mm = r6(z1_mm)
+    z2_mm = r6(z2_mm)
+    if abs(z2_mm - z1_mm) < 1e-9:
+        raise ValueError(f"Integration line zero: z1={z1_mm}, z2={z2_mm}")
+
+    int_line = [[x_mm, y_mm, z1_mm], [x_mm, y_mm, z2_mm]]
+
+    # 1) API alto nível
+    try:
+        ok = hfss.lumped_port(
+            assignment=sheet_name,
+            reference=gnd_name,
+            impedance=z0_ohm,
+            renormalize=True,
+            name=pname,
+            integration_line=int_line   # floats, sem unidade, já arredondados
+        )
+        if ok:
+            return
+    except Exception as e:
+        print(f"[WARN] lumped_port (API alto nível) falhou: {e}")
+
+    # 2) Fallback gRPC (floats, sem 'mm')
+    try:
+        obnd = hfss.odesign.GetModule("BoundarySetup")
+        start = ["X:=", x_mm, "Y:=", y_mm, "Z:=", z1_mm]
+        end   = ["X:=", x_mm, "Y:=", y_mm, "Z:=", z2_mm]
+        obnd.AssignLumpedPort(
+            [
+                "NAME:" + pname,
+                "Objects:=", [sheet_name],
+                "DoDeembed:=", False,
+                "RenormalizeAllTerminals:=", True,
+                "Modes:=",
+                [
+                    "NAME:Modes",
+                    [
+                        "NAME:Mode1",
+                        "ModeNum:=", 1,
+                        "UseIntLine:=", True,
+                        "IntLine:=", ["Start:=", start, "End:=", end],
+                        "AlignmentGroup:=", 0,
+                        "CharImp:=", "Zpi",
+                        "RenormImp:=", f"{z0_ohm}ohm",
+                    ]
+                ],
+                "ShowReporterFilter:=", False,
+                "ReporterFilter:=", [True],
+                "Impedance:=", f"{z0_ohm}ohm",
+                "ReferenceConductors:=", [gnd_name],
+            ]
+        )
+    except Exception as e:
+        raise RuntimeError(f"AssignLumpedPort (gRPC) falhou para {pname} no sheet {sheet_name}: {e}")
 
 # ===================== Construção do Modelo =====================
 def create_param(hfss: Hfss, name: str, expr: str) -> str:
@@ -163,31 +210,31 @@ def build_array_project(
     # Parâmetros
     create_param(hfss, "f0", f"{f0:.6f}GHz")
     create_param(hfss, "epsr", f"{eps_r}")
-    create_param(hfss, "h", f"{h_mm:.6f}mm")
-    create_param(hfss, "Wp", f"{Wp:.6f}mm")
-    create_param(hfss, "Lp", f"{Lp:.6f}mm")
-    create_param(hfss, "Wt", f"{Wt:.6f}mm")
-    create_param(hfss, "Lq", f"{Lq:.6f}mm")
-    create_param(hfss, "Pad", f"{Pad:.6f}mm")
-    create_param(hfss, "pitch", f"{pitch:.6f}mm")
-    create_param(hfss, "sx", f"{sx:.6f}mm")
-    create_param(hfss, "sy", f"{sy:.6f}mm")
-    create_param(hfss, "tCu", f"{COPPER_T:.6f}mm")
+    create_param(hfss, "h", f"{r6(h_mm)}mm")
+    create_param(hfss, "Wp", f"{r6(Wp)}mm")
+    create_param(hfss, "Lp", f"{r6(Lp)}mm")
+    create_param(hfss, "Wt", f"{r6(Wt)}mm")
+    create_param(hfss, "Lq", f"{r6(Lq)}mm")
+    create_param(hfss, "Pad", f"{r6(Pad)}mm")
+    create_param(hfss, "pitch", f"{r6(pitch)}mm")
+    create_param(hfss, "sx", f"{r6(sx)}mm")
+    create_param(hfss, "sy", f"{r6(sy)}mm")
+    create_param(hfss, "tCu", f"{r6(COPPER_T)}mm")
 
-    # Geometrias principais
+    # Geometrias
     gnd = hfss.modeler.create_box(
-        origin=[f"-sx/2", f"-sy/2", "0"],
+        origin=["-sx/2", "-sy/2", "0"],
         sizes=["sx", "sy", "tCu"],
         name="GND",
         material="pec"
     )
-    sub = hfss.modeler.create_box(
-        origin=[f"-sx/2", f"-sy/2", "tCu"],
+    hfss.modeler.create_box(
+        origin=["-sx/2", "-sy/2", "tCu"],
         sizes=["sx", "sy", "h"],
         name="SUB",
         material="FR4_epoxy"
     )
-    z_top = "tCu+h"  # topo do dielétrico; o cobre superior começa em z_top
+    z_top = "tCu+h"
 
     port_names: List[str] = []
     x0 = -(nx - 1) * pitch / 2.0
@@ -197,104 +244,65 @@ def build_array_project(
         for iy in range(ny):
             cx = x0 + ix * pitch
             cy = y0 + iy * pitch
+            cx = r6(cx); cy = r6(cy)
 
             cx_s = f"{cx:.6f}mm"
             cy_s = f"{cy:.6f}mm"
 
-            patch = hfss.modeler.create_box(
+            hfss.modeler.create_box(
                 origin=[f"{cx_s}-Wp/2", f"{cy_s}-Lp/2", z_top],
                 sizes=["Wp", "Lp", "tCu"],
                 name=f"PATCH_{ix+1}_{iy+1}",
                 material="pec"
             )
 
-            patch_y_min = f"{cy_s}-Lp/2"
-            line_y0 = f"({patch_y_min})-Lq"
-            feed_y0 = f"({line_y0})-Pad"
+            patch_y_min_val = r6(cy - Lp/2.0)
+            line_y0_val = r6(patch_y_min_val - Lq)
+            feed_y0_val = r6(line_y0_val - Pad)
 
-            line = hfss.modeler.create_box(
+            line_y0 = f"{line_y0_val:.6f}mm"
+            feed_y0 = f"{feed_y0_val:.6f}mm"
+
+            hfss.modeler.create_box(
                 origin=[f"{cx_s}-Wt/2", line_y0, z_top],
                 sizes=["Wt", "Lq", "tCu"],
                 name=f"TPLINE_{ix+1}_{iy+1}",
                 material="pec"
             )
 
-            pad = hfss.modeler.create_box(
+            hfss.modeler.create_box(
                 origin=[f"{cx_s}-Wt/2", feed_y0, z_top],
                 sizes=["Wt", "Pad", "tCu"],
                 name=f"FEEDPAD_{ix+1}_{iy+1}",
                 material="pec"
             )
 
-            # Criação CORRETA da porta lumped
-            pname = f"P{len(port_names)+1}"
-            
-            # 1. Cria o sheet para a porta (largura = Wt, altura = h)
+            # PORT SHEET (XZ) - usa as MESMAS coords (com mesmo arredondamento!)
             sheet_name = f"PORTSHEET_{ix+1}_{iy+1}"
-            port_sheet = hfss.modeler.create_rectangle(
-                origin=[f"{cx_s}-Wt/2", feed_y0, "tCu"],
-                sizes=["Wt", "h"],
+            hfss.modeler.create_rectangle(
+                origin=[f"{(cx - Wt/2):.6f}mm", f"{feed_y0_val:.6f}mm", "0"],
+                sizes=[f"{r6(Wt):.6f}mm", "h+2*tCu"],   # usa expressão pra casar com z1/z2
                 orientation="XZ",
                 name=sheet_name
             )
-            
-            # 2. Obtém a face do sheet
-            faces = hfss.modeler.get_object_faces(port_sheet.name)
-            if not faces:
-                print(f"AVISO: Nenhuma face encontrada para {sheet_name}")
-                continue
-            
-            # 3. Define a integration line (do terra até a linha condutora)
-            # Ponto inicial: centro do sheet na base (GND)
-            # Ponto final: centro do sheet no topo (feed pad)
-            start_point = [f"{cx_s}", feed_y0, "tCu"]
-            end_point = [f"{cx_s}", feed_y0, "tCu+h"]
-            
-            # 4. Cria a porta lumped com integration line
-            try:
-                port = hfss.lumped_port(
-                    assignment=faces[0],
-                    reference=gnd,
-                    impedance=Z0_PORT,
-                    renormalize=True,
-                    name=pname
-                )
-                
-                # Define a integration line manualmente (se suportado pela API)
-                # Esta é uma abordagem alternativa caso a API não defina automaticamente
-                try:
-                    port.props["Modes"]["Mode1"]["UseIntLine"] = True
-                    port.props["Modes"]["Mode1"]["IntLine"] = {
-                        "Start": start_point,
-                        "End": end_point
-                    }
-                    port.update()
-                except Exception as e:
-                    print(f"AVISO: Não foi possível definir integration line para {pname}: {str(e)}")
-                
-                port_names.append(pname)
-                print(f"Porta {pname} criada com sucesso")
-                
-            except Exception as e:
-                print(f"ERRO: Falha ao criar porta {pname}: {str(e)}")
-                # Tenta criar a porta sem integration line explícita
-                try:
-                    port = hfss.lumped_port(
-                        assignment=faces[0],
-                        reference=gnd,
-                        impedance=Z0_PORT,
-                        renormalize=True,
-                        name=pname
-                    )
-                    port_names.append(pname)
-                    print(f"Porta {pname} criada sem integration line explícita")
-                except Exception as e2:
-                    print(f"Falha alternativa também: {str(e2)}")
 
-    # Região aberta
+            # Integração em Z: mesmos números usados acima
+            z1 = r6(0.5 * COPPER_T)
+            z2 = r6(h_mm + 1.5 * COPPER_T)
+            pname = f"P{len(port_names)+1}"
+
+            print(f"[INT-LINE] {pname}: Start=({cx:.6f}, {feed_y0_val:.6f}, {z1:.6f})  "
+                  f"End=({cx:.6f}, {feed_y0_val:.6f}, {z2:.6f}) [mm]")
+
+            _assign_lumped_port_sheet(
+                hfss, sheet_name, gnd.name, pname,
+                x_mm=cx, y_mm=feed_y0_val, z1_mm=z1, z2_mm=z2, z0_ohm=Z0_PORT
+            )
+            port_names.append(pname)
+
     hfss.create_open_region(frequency=f"{f0}GHz")
 
-    # Setup único
+    # Setup
     for setup_name in list(hfss.setups.keys()):
         if setup_name != SETUP_NAME:
             hfss.setups[setup_name].delete()
@@ -305,7 +313,7 @@ def build_array_project(
     setup.props["MaximumDeltaS"] = 0.02
     setup.update()
 
-    sweep = setup.create_frequency_sweep(
+    setup.create_frequency_sweep(
         sweepname=SWEEP_NAME,
         unit="GHz",
         freqstart=fstart,
@@ -316,21 +324,13 @@ def build_array_project(
 
     hfss.save_project()
 
-    # Validação simples das portas (contagem)
-    try:
-        ex = hfss.excitations
-        if ex and len(ex) != len(port_names):
-            print(f"[WARN] Excitações em HFSS ({len(ex)}) != portas criadas ({len(port_names)}). ex={ex}")
-    except Exception:
-        pass
-
     if solve_after:
         hfss.analyze_setup(SETUP_NAME)
         try:
-            report = hfss.post.reports_by_category.standard("dB(S(1,1))")
-            report.props["Primary Sweep"] = "Freq"
-            report.props["Secondary Sweep"] = ""
-            report.create()
+            rep = hfss.post.reports_by_category.standard("dB(S(1,1))")
+            rep.props["Primary Sweep"] = "Freq"
+            rep.props["Secondary Sweep"] = ""
+            rep.create()
         except Exception as e:
             print(f"Erro ao criar relatório: {e}")
         hfss.save_project()
@@ -347,7 +347,7 @@ def build_array_project(
     }
     return hfss, info
 
-# ===================== GUI (customtkinter) =====================
+# ===================== GUI =====================
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -355,7 +355,6 @@ class App(ctk.CTk):
         self.geometry("820x600")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
-
         self.hfss_ref: Hfss | None = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -365,41 +364,31 @@ class App(ctk.CTk):
         self._mk_row(3, "εr (FR4≈4.4):", "4.4")
         self._mk_row(4, "Altura do substrato h (mm):", "1.57")
 
-        self.chk_run = ctk.CTkCheckBox(self, text="Rodar simulação após criar")
+        self.chk_run = ctk.CTkCheckBox(self, text="Rodar simulação após criar"); self.chk_run.select()
         self.chk_run.grid(row=5, column=1, padx=10, pady=(6, 6), sticky="w")
-        self.chk_run.select()
 
         self.btn = ctk.CTkButton(self, text="Criar Array no HFSS", command=self.on_create)
         self.btn.grid(row=6, column=1, padx=10, pady=(0, 8), sticky="w")
 
         self.txt = ctk.CTkTextbox(self, width=780, height=360)
         self.txt.grid(row=7, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(7, weight=1)
-        self._log("[Dica] Porta lumped criada com geometria correta: largura=Wt, altura=h")
-        self._log("[Dica] Integration line do terra até a linha condutora")
+        self.grid_columnconfigure(1, weight=1); self.grid_rowconfigure(7, weight=1)
+        self._log("[Fix] int-line usa exatamente os mesmos números do sheet (r6).")
 
     def _mk_row(self, r, label, default):
         ctk.CTkLabel(self, text=label).grid(row=r, column=0, padx=10, pady=6, sticky="e")
-        e = ctk.CTkEntry(self)
-        e.insert(0, default)
+        e = ctk.CTkEntry(self); e.insert(0, default)
         e.grid(row=r, column=1, padx=10, pady=6, sticky="ew")
         setattr(self, f"e{r}", e)
 
     def _log(self, s: str):
-        self.txt.insert("end", s + "\n")
-        self.txt.see("end")
+        self.txt.insert("end", s + "\n"); self.txt.see("end")
 
     def on_create(self):
         try:
-            fmin = float(self.e0.get())
-            fmax = float(self.e1.get())
-            if fmax <= fmin:
-                raise ValueError("fmax deve ser maior que fmin.")
-
-            gtar = float(self.e2.get())
-            epsr = float(self.e3.get())
-            h = float(self.e4.get())
+            fmin = float(self.e0.get()); fmax = float(self.e1.get())
+            if fmax <= fmin: raise ValueError("fmax deve ser maior que fmin.")
+            gtar = float(self.e2.get()); epsr = float(self.e3.get()); h = float(self.e4.get())
             run_after = self.chk_run.get()
 
             f0 = 0.5*(fmin+fmax)
@@ -407,23 +396,18 @@ class App(ctk.CTk):
             self._log(f"[Analítico] f0={f0:.3f} GHz | W≈{Wp:.2f} mm, L≈{Lp:.2f} mm, εeff≈{ee:.4f}")
 
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            out_dir = script_dir
-
             hfss, info = build_array_project(
                 fmin_GHz=fmin, fmax_GHz=fmax, g_target_dbi=gtar,
-                eps_r=epsr, h_mm=h, out_dir=out_dir, solve_after=run_after
+                eps_r=epsr, h_mm=h, out_dir=script_dir, solve_after=run_after
             )
             self.hfss_ref = hfss
-
             self._log(f"[Projeto] {info['project_path']}")
             self._log(f"[Linha λ/4] Zt≈{info['Zt_ohm']:.1f} Ω | Wt≈{info['Wt_mm']:.2f} mm | Lq≈{info['Lq_mm']:.2f} mm | Pad≈{info['Pad_mm']:.2f} mm")
             self._log(f"[Sweep] {info['setup']} : {info['sweep']}  ({info['fstart_GHz']:.3f}–{info['fstop_GHz']:.3f} GHz)")
             self._log(f"[Ports] {', '.join(info['ports'])}")
             self._log(f"[Array] {info['nx']}×{info['ny']} = {info['N']} elementos")
-
         except Exception as e:
-            self._log("Erro: " + str(e))
-            self._log(traceback.format_exc())
+            self._log("Erro: " + str(e)); self._log(traceback.format_exc())
 
     def on_close(self):
         try:

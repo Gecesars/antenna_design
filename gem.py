@@ -11,9 +11,9 @@ from ansys.aedt.core import Hfss
 AEDT_VERSION = "2024.2"
 UNITS = "mm"
 COPPER_T = 0.035
-PATCH_GAIN_DBI = 6.5  # Ganho típico de um único patch
+PATCH_GAIN_DBI = 6.5
 Z0_PORT = 50.0
-ZPATCH_EDGE = 200.0  # Impedância de borda estimada para o patch
+ZPATCH_EDGE = 200.0
 PAD_MIN = 1.0
 
 SETUP_NAME = "MainSetup"
@@ -58,7 +58,6 @@ def quarter_wave_len_mm(f0_GHz, eps_r, w_mm, h_mm):
 
 # ===================== Arquivos / Projeto ======================
 def clean_previous(project_path: str):
-    # (Função de limpeza mantida como estava)
     if os.path.exists(project_path):
         try: os.remove(project_path)
         except Exception: pass
@@ -71,27 +70,6 @@ def clean_previous(project_path: str):
         except Exception: pass
 
 # ===================== Construção do Modelo =====================
-def create_param(hfss: Hfss, name: str, expr: str):
-    hfss[name] = expr
-
-def assign_lumped_port_with_integration_line(hfss: Hfss, sheet_name: str, port_name: str, start_coord: list, end_coord: list):
-    """Cria uma porta lumped em um sheet, definindo explicitamente a linha de integração."""
-    try:
-        # A referência ao GND é implícita quando a linha de integração é fornecida
-        # e o sheet toca fisicamente o plano de terra.
-        port = hfss.lumped_port(
-            assignment=sheet_name,
-            impedance=Z0_PORT,
-            renormalize=True,
-            name=port_name,
-            integration_line_start=start_coord,
-            integration_line_stop=end_coord
-        )
-        return port
-    except Exception as e:
-        print(f"Erro ao criar porta {port_name}: {str(e)}")
-        raise
-
 def build_array_project(
     fmin_GHz: float, fmax_GHz: float, g_target_dbi: float,
     eps_r: float, h_mm: float, out_dir: str, solve_after: bool = True,
@@ -105,17 +83,20 @@ def build_array_project(
 
     Wp, Lp, eps_eff_patch = hammerstad_patch_dims(f0, eps_r, h_mm)
 
-    # Lógica para determinar o número de elementos do arranjo
     gain_factor_needed = 10 ** ((g_target_dbi - PATCH_GAIN_DBI) / 10.0)
     n_elements = max(1, math.ceil(gain_factor_needed))
     nx = int(round(math.sqrt(n_elements)))
     ny = int(math.ceil(n_elements / nx))
     N = nx * ny
 
-    Zt = math.sqrt(Z0_PORT * ZPATCH_EDGE); Wt = w_for_z0(eps_r, h_mm, Zt)
-    Lq = quarter_wave_len_mm(f0, eps_r, Wt, h_mm); Pad = max(PAD_MIN, 0.6 * Wt)
+    # Cálculos para as linhas de transmissão
+    Zt = math.sqrt(Z0_PORT * ZPATCH_EDGE);
+    Wt = w_for_z0(eps_r, h_mm, Zt) # Largura do transformador
+    W_feed = w_for_z0(eps_r, h_mm, Z0_PORT) # Largura da linha de 50 Ohm
+    Lq = quarter_wave_len_mm(f0, eps_r, Wt, h_mm)
+    Pad = max(PAD_MIN, 0.6 * Wt)
     
-    lam0 = c_mm_per_GHz() / f0; pitch = 0.75 * lam0  # Espaçamento típico entre 0.5 e 0.9 lambda
+    lam0 = c_mm_per_GHz() / f0; pitch = 0.75 * lam0
     sx = (nx - 1) * pitch + Wp + 20; sy = (ny - 1) * pitch + Lp + 2 * (Lq + Pad) + 20
 
     with Hfss(
@@ -123,13 +104,18 @@ def build_array_project(
         specified_version=AEDT_VERSION, non_graphical=False, new_desktop_session=True) as hfss:
         
         hfss.modeler.model_units = UNITS
-        z_top = f"{h_mm+COPPER_T:.6f}mm"
+        
+        # --- Parâmetros de Geometria no HFSS ---
+        hfss["h"] = f"{h_mm:.6f}mm"
+        hfss["tCu"] = f"{COPPER_T:.6f}mm"
+        z_gnd_top = "tCu"
+        z_sub_top = "tCu+h"
 
-        gnd = hfss.modeler.create_box(origin=[f"{-sx/2}", f"{-sy/2}", "0"], sizes=[f"{sx}", f"{sy}", f"{COPPER_T}"], name="GND", matname="pec")
-        sub = hfss.modeler.create_box(origin=[f"{-sx/2}", f"{-sy/2}", f"{COPPER_T}"], sizes=[f"{sx}", f"{sy}", f"{h_mm}"], name="SUB", matname="FR4_epoxy")
+        gnd = hfss.modeler.create_box(origin=[f"{-sx/2}", f"{-sy/2}", "0"], sizes=[f"{sx}", f"{sy}", "tCu"], name="GND", matname="pec")
+        sub = hfss.modeler.create_box(origin=[f"{-sx/2}", f"{-sy/2}", z_gnd_top], sizes=[f"{sx}", f"{sy}", "h"], name="SUB", matname="FR4_epoxy")
         
         all_copper_parts = []
-        port_names: List[str] = []
+        port_names: list[str] = []
         x0 = -(nx - 1) * pitch / 2.0
         y0 = -(ny - 1) * pitch / 2.0
 
@@ -139,37 +125,39 @@ def build_array_project(
                 cx = x0 + ix * pitch
                 cy = y0 + iy * pitch
 
-                patch = hfss.modeler.create_box(origin=[f"{cx-Wp/2}", f"{cy-Lp/2}", z_top], sizes=[f"{Wp}", f"{Lp}", f"{COPPER_T}"], name=f"Patch{el_name}", matname="pec")
+                patch = hfss.modeler.create_box(origin=[f"{cx-Wp/2}", f"{cy-Lp/2}", z_sub_top], sizes=[f"{Wp}", f"{Lp}", "tCu"], name=f"Patch{el_name}", matname="pec")
                 
                 patch_y_min = cy - Lp/2
-                line = hfss.modeler.create_box(origin=[f"{cx-Wt/2}", f"{patch_y_min-Lq}", z_top], sizes=[f"{Wt}", f"{Lq}", f"{COPPER_T}"], name=f"Tpline{el_name}", matname="pec")
+                line = hfss.modeler.create_box(origin=[f"{cx-Wt/2}", f"{patch_y_min-Lq}", z_sub_top], sizes=[f"{Wt}", f"{Lq}", "tCu"], name=f"Tpline{el_name}", matname="pec")
                 
                 pad_y_start = patch_y_min - Lq
-                pad = hfss.modeler.create_box(origin=[f"{cx-Wt/2}", f"{pad_y_start-Pad}", z_top], sizes=[f"{Wt}", f"{Pad}", f"{COPPER_T}"], name=f"Feedpad{el_name}", matname="pec")
+                # CORREÇÃO: Pad agora usa a largura correta da linha de 50 Ohm (W_feed)
+                pad = hfss.modeler.create_box(origin=[f"{cx-W_feed/2}", f"{pad_y_start-Pad}", z_sub_top], sizes=[f"{W_feed}", f"{Pad}", "tCu"], name=f"Feedpad{el_name}", matname="pec")
                 
                 all_copper_parts.extend([patch, line, pad])
                 
-                # --- Criação da Porta Lumped com Linha de Integração ---
+                # --- CORREÇÃO: Posição e dimensões da Port Sheet ---
                 sheet_name = f"PortSheet{el_name}"
-                port_y_pos = pad_y_start - Pad
+                port_y_pos = pad_y_start - Pad # Posição final da linha de alimentação
                 
                 port_sheet = hfss.modeler.create_rectangle(
-                    origin=[f"{cx-Wt/2}", f"{port_y_pos}", "0"],
-                    sizes=[f"{Wt}", f"{h_mm + COPPER_T}"],
+                    origin=[f"{cx-W_feed/2}", f"{port_y_pos}", z_gnd_top],  # Origem Z no topo do GND
+                    sizes=[f"{W_feed}", "h"], # Largura da linha de 50 Ohm, Altura igual à do substrato
                     orientation="XZ",
                     name=sheet_name
                 )
 
                 port_name = f"P{len(port_names)+1}"
-                # Coordenadas da linha de integração: do GND ao centro do feed
-                start_coord = [f"{cx}mm", f"{port_y_pos}mm", "0mm"]
-                end_coord = [f"{cx}mm", f"{port_y_pos}mm", f"{h_mm+COPPER_T}mm"]
-                
-                assign_lumped_port_with_integration_line(hfss, sheet_name, port_name, start_coord, end_coord)
+                hfss.lumped_port(
+                    assignment=sheet_name,
+                    reference="GND", # Referência explícita ao plano de terra
+                    impedance=Z0_PORT,
+                    renormalize=True,
+                    name=port_name
+                )
                 port_names.append(port_name)
 
         hfss.modeler.unite(all_copper_parts, keep_originals=False)
-        hfss.assign_perfecte_to_sheets("GND")
         
         hfss.create_open_region(frequency=f"{f0}GHz")
 
@@ -185,7 +173,7 @@ def build_array_project(
         
         if solve_after:
             hfss.analyze_setup(SETUP_NAME)
-            hfss.post.create_report([f"dB(S({p},{p}))" for p in port_names])
+            hfss.post.create_report([f"dB(S({p_idx+1},{p_idx+1}))" for p_idx, p in enumerate(port_names)])
             hfss.post.create_far_fields_report(expressions="GainTotal", plot_type="3D Polar Plot")
             hfss.save_project()
 
@@ -194,19 +182,16 @@ def build_array_project(
                  "setup": SETUP_NAME, "sweep": SWEEP_NAME, "fstart_GHz": fstart, "fstop_GHz": fstop }
         return hfss, info
 
-# ===================== GUI e Main =====================
-# (A classe App da GUI e o bloco __main__ permanecem os mesmos, omitidos para brevidade)
+# ===================== GUI e Main (Omitido para brevidade, permanece o mesmo) =====================
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("HFSS Patch Array Designer"); self.geometry("820x600")
+        self.title("HFSS Patch Array Designer (vFinal)"); self.geometry("820x600")
         ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("dark-blue")
         self.hfss_ref: Hfss | None = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self._mk_row(0, "Frequência mínima (GHz):", "2.3")
-        self._mk_row(1, "Frequência máxima (GHz):", "2.5")
-        self._mk_row(2, "Ganho alvo do array (dBi):", "8")
-        self._mk_row(3, "εr (FR4≈4.4):", "4.4")
+        self._mk_row(0, "Frequência mínima (GHz):", "2.3"); self._mk_row(1, "Frequência máxima (GHz):", "2.5")
+        self._mk_row(2, "Ganho alvo do array (dBi):", "8"); self._mk_row(3, "εr (FR4≈4.4):", "4.4")
         self._mk_row(4, "Altura do substrato h (mm):", "1.57")
         self.chk_run = ctk.CTkCheckBox(self, text="Rodar simulação após criar"); self.chk_run.grid(row=5, column=1, padx=10, pady=(6, 6), sticky="w"); self.chk_run.select()
         self.btn = ctk.CTkButton(self, text="Criar e Simular Array no HFSS", command=self.on_create); self.btn.grid(row=6, column=1, padx=10, pady=(0, 8), sticky="w")
@@ -230,6 +215,7 @@ class App(ctk.CTk):
             f0 = 0.5*(fmin+fmax); Wp, Lp, ee = hammerstad_patch_dims(f0, epsr, h)
             self._log(f"[Analítico] f0={f0:.3f} GHz | W≈{Wp:.2f} mm, L≈{Lp:.2f} mm, εeff≈{ee:.4f}")
             out_dir = os.path.dirname(os.path.abspath(__file__))
+            self.btn.configure(state="disabled", text="Processando no HFSS..."); self.update_idletasks()
             hfss, info = build_array_project(
                 fmin_GHz=fmin, fmax_GHz=fmax, g_target_dbi=gtar,
                 eps_r=epsr, h_mm=h, out_dir=out_dir, solve_after=run_after
@@ -242,6 +228,8 @@ class App(ctk.CTk):
             else: self._log("[Simulação] Modelo criado. A análise não foi executada.")
         except Exception as e:
             self._log("ERRO: " + str(e)); self._log(traceback.format_exc())
+        finally:
+            self.btn.configure(state="normal", text="Criar e Simular Array no HFSS")
 
     def on_close(self):
         try:
