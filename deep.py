@@ -156,17 +156,14 @@ class PatchAntennaDesigner:
     
     def calculate_patch_dimensions(self, frequency):
         """Calcula as dimensões do patch baseado na frequência"""
-        # Fórmulas simplificadas para patch antenna
-        c = 3e8  # velocidade da luz m/s
-        er = 2.2  # permissividade relativa do substrato (Duroid)
+        # Usando as dimensões do exemplo original em 10 GHz como base
+        base_freq = 10.0
+        base_length = 9.57
+        base_width = 9.25
         
-        # Comprimento efetivo
-        lambda0 = c / (frequency * 1e9)
-        lambda_g = lambda0 / np.sqrt(er)
-        
-        # Dimensões do patch (aproximadas)
-        length = lambda_g / 2 * 1000  # convert to mm
-        width = length * 0.9  # relação aspect ratio comum
+        # Escala inversa com a frequência
+        length = (base_length * base_freq) / frequency
+        width = (base_width * base_freq) / frequency
         
         return length, width
     
@@ -218,14 +215,18 @@ class PatchAntennaDesigner:
             num_patches = self.params["num_patches"]
             
             for i in range(num_patches):
-                x_offset = i * (patch_width + spacing)
                 patch = signal.add_patch(
                     patch_length=patch_length, 
                     patch_width=patch_width, 
                     patch_name=f"Patch_{i+1}",
-                    frequency=self.params["frequency"] * 1e9,
-                    origin=[x_offset, 0, 0]
+                    frequency=self.params["frequency"] * 1e9
                 )
+                
+                # Move o patch para a posição correta
+                x_offset = i * (patch_width + spacing)
+                patch_obj = self.hfss.modeler.objects[patch.name]
+                patch_obj.move([x_offset, 0, 0])
+                
                 patch.create_probe_port(ground, rel_x_offset=0.485)
                 patches.append(patch)
             

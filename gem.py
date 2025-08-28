@@ -12,7 +12,7 @@ from ansys.aedt.core.modeler.advanced_cad.stackup_3d import Stackup3D
 AEDT_VERSION = "2024.2"
 UNITS = "mm"
 COPPER_T = 0.035
-PATCH_GAIN_DBI = 6.5  # Ganho típico de um único patch para cálculo do array
+PATCH_GAIN_DBI = 6.5
 
 # ===================== Utilidades Eletromag =====================
 def c_mm_per_GHz() -> float:
@@ -73,9 +73,7 @@ def build_array_project(
         
         hfss.modeler.model_units = UNITS
         
-        # --- Criação da Estrutura em Camadas (Stackup) ---
         stackup = Stackup3D(hfss)
-        
         ground = stackup.add_ground_layer("Ground", material="pec", thickness=COPPER_T)
         stackup.add_dielectric_layer("Substrate", thickness=h_mm, material="FR4_epoxy")
         signal = stackup.add_signal_layer("Signal", material="pec", thickness=COPPER_T)
@@ -85,7 +83,6 @@ def build_array_project(
         stackup.dielectric_x_size = f"{total_width}mm"
         stackup.dielectric_y_size = f"{total_length}mm"
 
-        # --- Criação do Arranjo de Patches e Portas (Loop) ---
         start_x = -(nx - 1) * pitch / 2.0
         start_y = -(ny - 1) * pitch / 2.0
         
@@ -96,17 +93,23 @@ def build_array_project(
                 cy = start_y + iy * pitch
                 patch_name = f"Patch_{ix+1}_{iy+1}"
                 
-                patch = signal.add_patch(
-                    patch_width=Wp, patch_length=Lp,
-                    patch_name=patch_name, center_position=[cx, cy]
-                )
+                # --- CORREÇÃO FINAL: Posicionando o patch pelo canto (origin) ---
+                # Calcula a posição do canto inferior-esquerdo a partir do centro
+                origin_x = cx - Wp / 2.0
+                origin_y = cy - Lp / 2.0
                 
-                # Cria a alimentação coaxial (probe feed) para este patch
-                # Esta função cria o pino, o furo no terra e a Wave Port automaticamente
+                # Remove o argumento 'center_position' e usa 'position'
+                patch = signal.add_patch(
+                    patch_width=Wp,
+                    patch_length=Lp,
+                    patch_name=patch_name,
+                    position=[origin_x, origin_y] 
+                )
+                # --- Fim da Correção ---
+
                 patch.create_probe_port(ground, x_offset=feed_offset_mm)
                 port_names.append(patch_name)
 
-        # --- Contornos, Setup e Análise ---
         region = hfss.modeler.create_region(pad_percent=300)
         hfss.assign_radiation_boundary_to_objects(region)
 
@@ -134,7 +137,7 @@ def build_array_project(
                  "setup": "MainSetup", "sweep": "FrequencySweep", "fstart_GHz": fstart, "fstop_GHz": fstop }
         return hfss, info
 
-# ===================== GUI e Main =====================
+# ===================== GUI e Main (Inalterado) =====================
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -142,7 +145,6 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("dark-blue")
         self.hfss_ref: Hfss | None = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        
         self._mk_row(0, "Frequência Mínima (GHz):", "2.3")
         self._mk_row(1, "Frequência Máxima (GHz):", "2.5")
         self._mk_row(2, "Ganho Alvo do Array (dBi):", "10")
@@ -150,7 +152,6 @@ class App(ctk.CTk):
         self._mk_row(4, "Altura do Substrato h (mm):", "1.57")
         self._mk_row(5, "Espaçamento (em λ₀, ex: 0.75):", "0.75")
         self._mk_row(6, "Deslocamento da Alimentação (mm):", "4.0")
-
         self.chk_run = ctk.CTkCheckBox(self, text="Rodar simulação após criar"); self.chk_run.grid(row=7, column=1, padx=10, pady=(10, 6), sticky="w"); self.chk_run.select()
         self.btn = ctk.CTkButton(self, text="Criar e Simular Array no HFSS", command=self.on_create); self.btn.grid(row=8, column=1, padx=10, pady=(0, 8), sticky="w")
         self.txt = ctk.CTkTextbox(self, width=780, height=300); self.txt.grid(row=9, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
@@ -171,20 +172,16 @@ class App(ctk.CTk):
             gtar = float(self.e2.get()); epsr = float(self.e3.get()); h = float(self.e4.get())
             spacing = float(self.e5.get()); feed_offset = float(self.e6.get())
             run_after = self.chk_run.get()
-            
             f0 = 0.5*(fmin+fmax); Wp, Lp, ee = hammerstad_patch_dims(f0, epsr, h)
             self._log(f"[Analítico] f0={f0:.3f} GHz | W≈{Wp:.2f} mm, L≈{Lp:.2f} mm, εeff≈{ee:.4f}")
             out_dir = os.path.dirname(os.path.abspath(__file__))
-            
             self.btn.configure(state="disabled", text="Processando no HFSS..."); self.update_idletasks()
-            
             hfss, info = build_array_project(
                 fmin_GHz=fmin, fmax_GHz=fmax, g_target_dbi=gtar,
                 eps_r=epsr, h_mm=h, spacing_factor=spacing, feed_offset_mm=feed_offset,
                 out_dir=out_dir, solve_after=run_after
             )
             self.hfss_ref = hfss
-            
             self._log(f"[Projeto] {info['project_path']}"); 
             self._log(f"[Sweep] {info['setup']} : {info['sweep']}  ({info['fstart_GHz']:.3f}–{info['fstop_GHz']:.3f} GHz)")
             self._log(f"[Ports] {', '.join(info['ports'])}"); self._log(f"[Array] {info['nx']}×{info['ny']} = {info['N']} elementos")
