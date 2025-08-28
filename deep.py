@@ -1,441 +1,321 @@
-# -*- coding: utf-8 -*-
-"""
-HFSS Patch Array — λ/4 Transformer + Portas Lumped Corrigidas
-PyAEDT==0.18.1 | HFSS 2024 R2
-
-Correções aplicadas:
-1. Geometria da porta lumped corrigida: largura = Wt, altura = h
-2. Integration line estendendo do terra até a linha condutora
-3. Posicionamento preciso da porta entre GND e feed pad
-"""
-
-from __future__ import annotations
-import os, math, shutil, traceback
-from typing import Tuple, List, Dict, Any
+import os
 import tempfile
-
+import time
+import ansys.aedt.core
+from ansys.aedt.core.modeler.advanced_cad.stackup_3d import Stackup3D
 import customtkinter as ctk
-from ansys.aedt.core import Hfss
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+import numpy as np
 
-# ===================== Configurações Gerais =====================
-AEDT_VERSION = "2024.2"
-UNITS = "mm"
-COPPER_T = 0.035
-PATCH_GAIN_DBI = 6.5
-Z0_PORT = 50.0
-ZPATCH_EDGE = 200.0
-PAD_MIN = 1.0
+# Configuração da interface gráfica
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
 
-SETUP_NAME = "OpSetup"
-SWEEP_NAME = "OpFast"
-
-# ===================== Utilidades Eletromag =====================
-def c_mm_per_GHz() -> float:
-    return 299.792458
-
-def hammerstad_patch_dims(f0_GHz: float, eps_r: float, h_mm: float) -> Tuple[float, float, float]:
-    c = c_mm_per_GHz()
-    W = c / (2.0 * f0_GHz) * math.sqrt(2.0 / (eps_r + 1.0))
-    eps_eff = (eps_r + 1.0) / 2.0 + (eps_r - 1.0) / 2.0 * (1.0 / math.sqrt(1.0 + 12.0 * h_mm / W))
-    dL = 0.412 * h_mm * ((eps_eff + 0.3) * (W/h_mm + 0.264)) / ((eps_eff - 0.258) * (W/h_mm + 0.8))
-    L_eff = c / (2.0 * f0_GHz * math.sqrt(eps_eff))
-    L = L_eff - 2.0 * dL
-    return W, L, eps_eff
-
-def _eps_eff_line(eps_r: float, w_h: float) -> float:
-    return (eps_r + 1)/2 + (eps_r - 1)/2 * (1 + 12/w_h) ** -0.5
-
-def z0_from_w_h(eps_r: float, w_h: float) -> float:
-    ee = _eps_eff_line(eps_r, w_h)
-    if w_h <= 1:
-        return (60 / math.sqrt(ee)) * math.log(8.0 / w_h + 0.25 * w_h)
-    else:
-        return (120 * math.pi) / (math.sqrt(ee) * (w_h + 1.393 + 0.667 * math.log(w_h + 1.444)))
-
-def w_for_z0(eps_r: float, h_mm: float, z0_ohm: float) -> float:
-    lo, hi = 0.05, 20.0
-    tolerance = 0.001
-    max_iter = 50
-    mid = (lo + hi) / 2.0
-    for _ in range(max_iter):
-        mid = (lo + hi) / 2.0
-        z0_calc = z0_from_w_h(eps_r, mid)
-        if abs(z0_calc - z0_ohm) < tolerance:
-            break
-        if z0_calc > z0_ohm:
-            lo = mid
-        else:
-            hi = mid
-    return mid * h_mm
-
-def quarter_wave_len_mm(f0_GHz: float, eps_r: float, w_mm: float, h_mm: float) -> float:
-    w_h = max(w_mm / h_mm, 1e-6)
-    ee = _eps_eff_line(eps_r, w_h)
-    lambda_g = c_mm_per_GHz() / (f0_GHz * math.sqrt(ee))
-    return lambda_g / 4.0
-
-# ===================== Arquivos / Projeto ======================
-def clean_previous(project_path: str):
-    if os.path.exists(project_path):
-        try:
-            os.remove(project_path)
-        except Exception:
-            pass
-
-    if os.path.exists(project_path + ".lock"):
-        try:
-            os.remove(project_path + ".lock")
-        except Exception:
-            pass
-
-    res_dir = project_path.replace(".aedt", ".aedtresults")
-    if os.path.exists(res_dir):
-        try:
-            shutil.rmtree(res_dir)
-        except Exception:
-            pass
-
-    semaphore_files = [
-        os.path.join(os.path.dirname(project_path), ".PatchArray_HFSS.asol_priv.semaphore"),
-        os.path.join(res_dir, ".PatchArray_HFSS.asol_priv.semaphore")
-    ]
-    for sem_file in semaphore_files:
-        if os.path.exists(sem_file):
-            try:
-                os.remove(sem_file)
-            except Exception:
-                pass
-
-# ===================== Construção do Modelo =====================
-def create_param(hfss: Hfss, name: str, expr: str) -> str:
-    hfss[name] = expr
-    return name
-
-def build_array_project(
-    fmin_GHz: float,
-    fmax_GHz: float,
-    g_target_dbi: float,
-    eps_r: float,
-    h_mm: float,
-    out_dir: str,
-    solve_after: bool = True,
-) -> tuple[Hfss, dict]:
-    os.makedirs(out_dir, exist_ok=True)
-    project_path = os.path.join(out_dir, "patch_array_hfss_modal.aedt")
-    clean_previous(project_path)
-
-    f0 = 0.5 * (fmin_GHz + fmax_GHz)
-    delta = 0.5 * (fmax_GHz - fmin_GHz) * 1.3
-    fstart = max(0.01, f0 - delta)
-    fstop = f0 + delta
-
-    Wp, Lp, eps_eff_patch = hammerstad_patch_dims(f0, eps_r, h_mm)
-
-    need = max(1.0, 10 ** ((g_target_dbi - PATCH_GAIN_DBI) / 10.0))
-    n = max(1, math.ceil(need))
-    nx = int(round(math.sqrt(n)))
-    ny = int(math.ceil(n / nx))
-    N = nx * ny
-
-    Zt = math.sqrt(Z0_PORT * ZPATCH_EDGE)
-    Wt = w_for_z0(eps_r, h_mm, Zt)
-    Lq = quarter_wave_len_mm(f0, eps_r, Wt, h_mm)
-    Pad = max(PAD_MIN, 0.6 * Wt)
-
-    lam0 = c_mm_per_GHz() / f0
-    pitch = 0.5 * lam0
-    margin_x = max(0.25 * pitch, 10.0)
-    margin_y = max(0.25 * pitch, 10.0, Lq + Pad + 5.0)
-    sx = nx * pitch + 2 * margin_x
-    sy = ny * pitch + 2 * margin_y
-
-    hfss = Hfss(
-        project=project_path,
-        design="PatchArray_HFSS",
-        solution_type="Modal",
-        new_desktop=True,
-        non_graphical=False,
-        version=AEDT_VERSION,
-        remove_lock=True
-    )
-    hfss.modeler.model_units = UNITS
-
-    # Parâmetros
-    create_param(hfss, "f0", f"{f0:.6f}GHz")
-    create_param(hfss, "epsr", f"{eps_r}")
-    create_param(hfss, "h", f"{h_mm:.6f}mm")
-    create_param(hfss, "Wp", f"{Wp:.6f}mm")
-    create_param(hfss, "Lp", f"{Lp:.6f}mm")
-    create_param(hfss, "Wt", f"{Wt:.6f}mm")
-    create_param(hfss, "Lq", f"{Lq:.6f}mm")
-    create_param(hfss, "Pad", f"{Pad:.6f}mm")
-    create_param(hfss, "pitch", f"{pitch:.6f}mm")
-    create_param(hfss, "sx", f"{sx:.6f}mm")
-    create_param(hfss, "sy", f"{sy:.6f}mm")
-    create_param(hfss, "tCu", f"{COPPER_T:.6f}mm")
-
-    # Geometrias principais
-    gnd = hfss.modeler.create_box(
-        origin=[f"-sx/2", f"-sy/2", "0"],
-        sizes=["sx", "sy", "tCu"],
-        name="GND",
-        material="pec"
-    )
-    sub = hfss.modeler.create_box(
-        origin=[f"-sx/2", f"-sy/2", "tCu"],
-        sizes=["sx", "sy", "h"],
-        name="SUB",
-        material="FR4_epoxy"
-    )
-    z_top = "tCu+h"  # topo do dielétrico; o cobre superior começa em z_top
-
-    port_names: List[str] = []
-    x0 = -(nx - 1) * pitch / 2.0
-    y0 = -(ny - 1) * pitch / 2.0
-
-    for ix in range(nx):
-        for iy in range(ny):
-            cx = x0 + ix * pitch
-            cy = y0 + iy * pitch
-
-            cx_s = f"{cx:.6f}mm"
-            cy_s = f"{cy:.6f}mm"
-
-            patch = hfss.modeler.create_box(
-                origin=[f"{cx_s}-Wp/2", f"{cy_s}-Lp/2", z_top],
-                sizes=["Wp", "Lp", "tCu"],
-                name=f"PATCH_{ix+1}_{iy+1}",
-                material="pec"
-            )
-
-            patch_y_min = f"{cy_s}-Lp/2"
-            line_y0 = f"({patch_y_min})-Lq"
-            feed_y0 = f"({line_y0})-Pad"
-
-            line = hfss.modeler.create_box(
-                origin=[f"{cx_s}-Wt/2", line_y0, z_top],
-                sizes=["Wt", "Lq", "tCu"],
-                name=f"TPLINE_{ix+1}_{iy+1}",
-                material="pec"
-            )
-
-            pad = hfss.modeler.create_box(
-                origin=[f"{cx_s}-Wt/2", feed_y0, z_top],
-                sizes=["Wt", "Pad", "tCu"],
-                name=f"FEEDPAD_{ix+1}_{iy+1}",
-                material="pec"
-            )
-
-            # Criação CORRETA da porta lumped
-            pname = f"P{len(port_names)+1}"
-            
-            # 1. Cria o sheet para a porta (largura = Wt, altura = h)
-            sheet_name = f"PORTSHEET_{ix+1}_{iy+1}"
-            port_sheet = hfss.modeler.create_rectangle(
-                origin=[f"{cx_s}-Wt/2", feed_y0, "tCu"],
-                sizes=["Wt", "h"],
-                orientation="XZ",
-                name=sheet_name
-            )
-            
-            # 2. Obtém a face do sheet
-            faces = hfss.modeler.get_object_faces(port_sheet.name)
-            if not faces:
-                print(f"AVISO: Nenhuma face encontrada para {sheet_name}")
-                continue
-            
-            # 3. Define a integration line (do terra até a linha condutora)
-            # Ponto inicial: centro do sheet na base (GND)
-            # Ponto final: centro do sheet no topo (feed pad)
-            start_point = [f"{cx_s}", feed_y0, "tCu"]
-            end_point = [f"{cx_s}", feed_y0, "tCu+h"]
-            
-            # 4. Cria a porta lumped com integration line
-            try:
-                port = hfss.lumped_port(
-                    assignment=faces[0],
-                    reference=gnd,
-                    impedance=Z0_PORT,
-                    renormalize=True,
-                    name=pname
-                )
-                
-                # Define a integration line manualmente (se suportado pela API)
-                # Esta é uma abordagem alternativa caso a API não defina automaticamente
-                try:
-                    port.props["Modes"]["Mode1"]["UseIntLine"] = True
-                    port.props["Modes"]["Mode1"]["IntLine"] = {
-                        "Start": start_point,
-                        "End": end_point
-                    }
-                    port.update()
-                except Exception as e:
-                    print(f"AVISO: Não foi possível definir integration line para {pname}: {str(e)}")
-                
-                port_names.append(pname)
-                print(f"Porta {pname} criada com sucesso")
-                
-            except Exception as e:
-                print(f"ERRO: Falha ao criar porta {pname}: {str(e)}")
-                # Tenta criar a porta sem integration line explícita
-                try:
-                    port = hfss.lumped_port(
-                        assignment=faces[0],
-                        reference=gnd,
-                        impedance=Z0_PORT,
-                        renormalize=True,
-                        name=pname
-                    )
-                    port_names.append(pname)
-                    print(f"Porta {pname} criada sem integration line explícita")
-                except Exception as e2:
-                    print(f"Falha alternativa também: {str(e2)}")
-
-    # Região aberta
-    hfss.create_open_region(frequency=f"{f0}GHz")
-
-    # Setup único
-    for setup_name in list(hfss.setups.keys()):
-        if setup_name != SETUP_NAME:
-            hfss.setups[setup_name].delete()
-
-    setup = hfss.create_setup(setupname=SETUP_NAME)
-    setup.props["Frequency"] = f"{f0}GHz"
-    setup.props["MaximumPasses"] = 6
-    setup.props["MaximumDeltaS"] = 0.02
-    setup.update()
-
-    sweep = setup.create_frequency_sweep(
-        sweepname=SWEEP_NAME,
-        unit="GHz",
-        freqstart=fstart,
-        freqstop=fstop,
-        sweep_type="Interpolating",
-        num_of_freq_points=101
-    )
-
-    hfss.save_project()
-
-    # Validação simples das portas (contagem)
-    try:
-        ex = hfss.excitations
-        if ex and len(ex) != len(port_names):
-            print(f"[WARN] Excitações em HFSS ({len(ex)}) != portas criadas ({len(port_names)}). ex={ex}")
-    except Exception:
-        pass
-
-    if solve_after:
-        hfss.analyze_setup(SETUP_NAME)
-        try:
-            report = hfss.post.reports_by_category.standard("dB(S(1,1))")
-            report.props["Primary Sweep"] = "Freq"
-            report.props["Secondary Sweep"] = ""
-            report.create()
-        except Exception as e:
-            print(f"Erro ao criar relatório: {e}")
-        hfss.save_project()
-
-    info = {
-        "project_path": project_path,
-        "f0_GHz": f0,
-        "Wp_mm": Wp, "Lp_mm": Lp, "eps_eff_patch": eps_eff_patch,
-        "Zt_ohm": Zt, "Wt_mm": Wt, "Lq_mm": Lq, "Pad_mm": Pad,
-        "nx": nx, "ny": ny, "N": N,
-        "ports": port_names,
-        "setup": SETUP_NAME, "sweep": SWEEP_NAME,
-        "fstart_GHz": fstart, "fstop_GHz": fstop
-    }
-    return hfss, info
-
-# ===================== GUI (customtkinter) =====================
-class App(ctk.CTk):
+class PatchAntennaDesigner:
     def __init__(self):
-        super().__init__()
-        self.title("HFSS Patch Array — λ/4 (PyAEDT)")
-        self.geometry("820x600")
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
-
-        self.hfss_ref: Hfss | None = None
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        self._mk_row(0, "Frequência mínima (GHz):", "2.3")
-        self._mk_row(1, "Frequência máxima (GHz):", "2.5")
-        self._mk_row(2, "Ganho alvo do array (dBi):", "12")
-        self._mk_row(3, "εr (FR4≈4.4):", "4.4")
-        self._mk_row(4, "Altura do substrato h (mm):", "1.57")
-
-        self.chk_run = ctk.CTkCheckBox(self, text="Rodar simulação após criar")
-        self.chk_run.grid(row=5, column=1, padx=10, pady=(6, 6), sticky="w")
-        self.chk_run.select()
-
-        self.btn = ctk.CTkButton(self, text="Criar Array no HFSS", command=self.on_create)
-        self.btn.grid(row=6, column=1, padx=10, pady=(0, 8), sticky="w")
-
-        self.txt = ctk.CTkTextbox(self, width=780, height=360)
-        self.txt.grid(row=7, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(7, weight=1)
-        self._log("[Dica] Porta lumped criada com geometria correta: largura=Wt, altura=h")
-        self._log("[Dica] Integration line do terra até a linha condutora")
-
-    def _mk_row(self, r, label, default):
-        ctk.CTkLabel(self, text=label).grid(row=r, column=0, padx=10, pady=6, sticky="e")
-        e = ctk.CTkEntry(self)
-        e.insert(0, default)
-        e.grid(row=r, column=1, padx=10, pady=6, sticky="ew")
-        setattr(self, f"e{r}", e)
-
-    def _log(self, s: str):
-        self.txt.insert("end", s + "\n")
-        self.txt.see("end")
-
-    def on_create(self):
+        self.hfss = None
+        self.temp_folder = None
+        self.project_name = ""
+        
+        # Parâmetros padrão
+        self.params = {
+            "frequency": 10.0,  # GHz
+            "gain": 8.0,        # dBi
+            "sweep_start": 8.0,
+            "sweep_stop": 12.0,
+            "num_patches": 1,
+            "spacing": 15.0,    # mm
+            "cores": 4,
+            "aedt_version": "2024.2"
+        }
+        
+        self.setup_gui()
+        
+    def setup_gui(self):
+        self.window = ctk.CTk()
+        self.window.title("Patch Antenna Array Designer")
+        self.window.geometry("800x600")
+        
+        # Frame principal
+        main_frame = ctk.CTkFrame(self.window)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Título
+        title_label = ctk.CTkLabel(main_frame, text="Patch Antenna Array Designer", 
+                                  font=ctk.CTkFont(size=20, weight="bold"))
+        title_label.pack(pady=10)
+        
+        # Frame de parâmetros
+        params_frame = ctk.CTkFrame(main_frame)
+        params_frame.pack(fill="x", padx=10, pady=10)
+        
+        # Campos de entrada
+        entries = []
+        row = 0
+        
+        # Frequência central
+        freq_label = ctk.CTkLabel(params_frame, text="Frequência Central (GHz):")
+        freq_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        freq_entry = ctk.CTkEntry(params_frame)
+        freq_entry.insert(0, str(self.params["frequency"]))
+        freq_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("frequency", freq_entry))
+        row += 1
+        
+        # Ganho desejado
+        gain_label = ctk.CTkLabel(params_frame, text="Ganho Desejado (dBi):")
+        gain_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        gain_entry = ctk.CTkEntry(params_frame)
+        gain_entry.insert(0, str(self.params["gain"]))
+        gain_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("gain", gain_entry))
+        row += 1
+        
+        # Início do sweep
+        sweep_start_label = ctk.CTkLabel(params_frame, text="Início do Sweep (GHz):")
+        sweep_start_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        sweep_start_entry = ctk.CTkEntry(params_frame)
+        sweep_start_entry.insert(0, str(self.params["sweep_start"]))
+        sweep_start_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("sweep_start", sweep_start_entry))
+        row += 1
+        
+        # Fim do sweep
+        sweep_stop_label = ctk.CTkLabel(params_frame, text="Fim do Sweep (GHz):")
+        sweep_stop_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        sweep_stop_entry = ctk.CTkEntry(params_frame)
+        sweep_stop_entry.insert(0, str(self.params["sweep_stop"]))
+        sweep_stop_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("sweep_stop", sweep_stop_entry))
+        row += 1
+        
+        # Número de patches
+        num_patches_label = ctk.CTkLabel(params_frame, text="Número de Patches:")
+        num_patches_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        num_patches_entry = ctk.CTkEntry(params_frame)
+        num_patches_entry.insert(0, str(self.params["num_patches"]))
+        num_patches_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("num_patches", num_patches_entry))
+        row += 1
+        
+        # Espaçamento entre patches
+        spacing_label = ctk.CTkLabel(params_frame, text="Espaçamento (mm):")
+        spacing_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        spacing_entry = ctk.CTkEntry(params_frame)
+        spacing_entry.insert(0, str(self.params["spacing"]))
+        spacing_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("spacing", spacing_entry))
+        row += 1
+        
+        # Número de núcleos
+        cores_label = ctk.CTkLabel(params_frame, text="Núcleos para Simulação:")
+        cores_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        cores_entry = ctk.CTkEntry(params_frame)
+        cores_entry.insert(0, str(self.params["cores"]))
+        cores_entry.grid(row=row, column=1, padx=5, pady=5)
+        entries.append(("cores", cores_entry))
+        row += 1
+        
+        self.entries = entries
+        
+        # Botões
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", padx=10, pady=10)
+        
+        run_button = ctk.CTkButton(button_frame, text="Executar Simulação", command=self.run_simulation)
+        run_button.pack(side="left", padx=5, pady=5)
+        
+        quit_button = ctk.CTkButton(button_frame, text="Sair", command=self.window.quit)
+        quit_button.pack(side="right", padx=5, pady=5)
+        
+        # Área de resultados
+        results_frame = ctk.CTkFrame(main_frame)
+        results_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self.status_label = ctk.CTkLabel(results_frame, text="Pronto para simular")
+        self.status_label.pack(pady=5)
+        
+        # Canvas para plotagem
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=results_frame)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+    def get_parameters(self):
+        """Obtém os parâmetros da interface"""
+        for key, entry in self.entries:
+            try:
+                if key in ["num_patches", "cores"]:
+                    self.params[key] = int(entry.get())
+                else:
+                    self.params[key] = float(entry.get())
+            except ValueError:
+                self.status_label.configure(text=f"Erro: Valor inválido para {key}")
+                return False
+        return True
+    
+    def calculate_patch_dimensions(self, frequency):
+        """Calcula as dimensões do patch baseado na frequência"""
+        # Fórmulas simplificadas para patch antenna
+        c = 3e8  # velocidade da luz m/s
+        er = 2.2  # permissividade relativa do substrato (Duroid)
+        
+        # Comprimento efetivo
+        lambda0 = c / (frequency * 1e9)
+        lambda_g = lambda0 / np.sqrt(er)
+        
+        # Dimensões do patch (aproximadas)
+        length = lambda_g / 2 * 1000  # convert to mm
+        width = length * 0.9  # relação aspect ratio comum
+        
+        return length, width
+    
+    def run_simulation(self):
+        """Executa a simulação completa"""
+        if not self.get_parameters():
+            return
+            
+        self.status_label.configure(text="Iniciando simulação...")
+        self.window.update()
+        
         try:
-            fmin = float(self.e0.get())
-            fmax = float(self.e1.get())
-            if fmax <= fmin:
-                raise ValueError("fmax deve ser maior que fmin.")
-
-            gtar = float(self.e2.get())
-            epsr = float(self.e3.get())
-            h = float(self.e4.get())
-            run_after = self.chk_run.get()
-
-            f0 = 0.5*(fmin+fmax)
-            Wp, Lp, ee = hammerstad_patch_dims(f0, epsr, h)
-            self._log(f"[Analítico] f0={f0:.3f} GHz | W≈{Wp:.2f} mm, L≈{Lp:.2f} mm, εeff≈{ee:.4f}")
-
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            out_dir = script_dir
-
-            hfss, info = build_array_project(
-                fmin_GHz=fmin, fmax_GHz=fmax, g_target_dbi=gtar,
-                eps_r=epsr, h_mm=h, out_dir=out_dir, solve_after=run_after
+            # Cria diretório temporário
+            self.temp_folder = tempfile.TemporaryDirectory(suffix=".ansys")
+            self.project_name = os.path.join(self.temp_folder.name, "patch_array.aedt")
+            
+            # Inicializa HFSS
+            self.hfss = ansys.aedt.core.Hfss(
+                project=self.project_name,
+                solution_type="Terminal",
+                design="patch_array",
+                non_graphical=True,
+                new_desktop=True,
+                version=self.params["aedt_version"],
             )
-            self.hfss_ref = hfss
-
-            self._log(f"[Projeto] {info['project_path']}")
-            self._log(f"[Linha λ/4] Zt≈{info['Zt_ohm']:.1f} Ω | Wt≈{info['Wt_mm']:.2f} mm | Lq≈{info['Lq_mm']:.2f} mm | Pad≈{info['Pad_mm']:.2f} mm")
-            self._log(f"[Sweep] {info['setup']} : {info['sweep']}  ({info['fstart_GHz']:.3f}–{info['fstop_GHz']:.3f} GHz)")
-            self._log(f"[Ports] {', '.join(info['ports'])}")
-            self._log(f"[Array] {info['nx']}×{info['ny']} = {info['N']} elementos")
-
+            
+            # Configura unidades
+            length_units = "mm"
+            self.hfss.modeler.model_units = length_units
+            
+            # Cria stackup
+            stackup = Stackup3D(self.hfss)
+            ground = stackup.add_ground_layer(
+                "ground", material="copper", thickness=0.035, fill_material="air"
+            )
+            dielectric = stackup.add_dielectric_layer(
+                "dielectric", thickness="0.5" + length_units, material="Duroid (tm)"
+            )
+            signal = stackup.add_signal_layer(
+                "signal", material="copper", thickness=0.035, fill_material="air"
+            )
+            
+            # Calcula dimensões do patch
+            patch_length, patch_width = self.calculate_patch_dimensions(self.params["frequency"])
+            
+            # Cria múltiplos patches
+            patches = []
+            spacing = self.params["spacing"]
+            num_patches = self.params["num_patches"]
+            
+            for i in range(num_patches):
+                x_offset = i * (patch_width + spacing)
+                patch = signal.add_patch(
+                    patch_length=patch_length, 
+                    patch_width=patch_width, 
+                    patch_name=f"Patch_{i+1}",
+                    frequency=self.params["frequency"] * 1e9,
+                    origin=[x_offset, 0, 0]
+                )
+                patch.create_probe_port(ground, rel_x_offset=0.485)
+                patches.append(patch)
+            
+            # Redimensiona a região em torno do array
+            stackup.resize_around_element(patches[0])
+            pad_length = [3, 3, 3, 3, 3, 3]  # Air bounding box buffer in mm.
+            region = self.hfss.modeler.create_region(pad_length, is_percentage=False)
+            self.hfss.assign_radiation_boundary_to_objects(region)
+            
+            # Define configuração de simulação
+            setup = self.hfss.create_setup(
+                name="Setup1", 
+                setup_type="HFSSDriven", 
+                Frequency=f"{self.params['frequency']}GHz"
+            )
+            
+            setup.create_frequency_sweep(
+                unit="GHz",
+                name="Sweep1",
+                start_frequency=self.params["sweep_start"],
+                stop_frequency=self.params["sweep_stop"],
+                sweep_type="Interpolating",
+            )
+            
+            self.status_label.configure(text="Simulando...")
+            self.window.update()
+            
+            # Executa a simulação
+            self.hfss.save_project()
+            self.hfss.analyze(cores=self.params["cores"])
+            
+            # Processa resultados
+            self.status_label.configure(text="Processando resultados...")
+            self.window.update()
+            
+            self.plot_results()
+            
+            self.status_label.configure(text="Simulação concluída com sucesso!")
+            
         except Exception as e:
-            self._log("Erro: " + str(e))
-            self._log(traceback.format_exc())
-
-    def on_close(self):
+            self.status_label.configure(text=f"Erro: {str(e)}")
+            
+    def plot_results(self):
+        """Plota os resultados da simulação"""
+        self.ax.clear()
+        
+        # Obtém dados S-parameter
+        plot_data = self.hfss.get_traces_for_plot()
+        report = self.hfss.post.create_report(plot_data)
+        solution = report.get_solution_data()
+        
+        # Plota S11 para cada porta
+        for i, trace in enumerate(solution.expressions):
+            if "S" in trace and "dB" in trace:
+                freq_data = solution.sweeps["Freq"]
+                s_data = solution.data_real(trace)
+                self.ax.plot(freq_data, s_data, label=f"Porta {i+1}")
+        
+        self.ax.set_xlabel("Frequência (GHz)")
+        self.ax.set_ylabel("S-Parameter (dB)")
+        self.ax.set_title("Resultados de S-Parameter")
+        self.ax.legend()
+        self.ax.grid(True)
+        
+        self.canvas.draw()
+        
+    def cleanup(self):
+        """Limpa recursos após fechar a aplicação"""
+        if self.hfss:
+            try:
+                self.hfss.save_project()
+                self.hfss.release_desktop()
+                time.sleep(3)
+            except:
+                pass
+                
+        if self.temp_folder:
+            try:
+                self.temp_folder.cleanup()
+            except:
+                pass
+    
+    def run(self):
+        """Executa a aplicação"""
         try:
-            if self.hfss_ref is not None:
-                self.hfss_ref.release_desktop(close_projects=True, close_desktop=True)
-                self._log("[AEDT] Instância liberada.")
-        except Exception as e:
-            self._log(f"[AEDT] Falha ao liberar: {e}")
+            self.window.mainloop()
         finally:
-            self.destroy()
+            self.cleanup()
 
-# ===================== Main =====================
+# Executa a aplicação
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    app = PatchAntennaDesigner()
+    app.run()
