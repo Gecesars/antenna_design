@@ -1,6 +1,6 @@
+# -*- coding: utf-8 -*-
 import os
 import tempfile
-import time
 import ansys.aedt.core
 import customtkinter as ctk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -30,7 +30,7 @@ class PatchAntennaDesigner:
         self.save_project = False
         self.is_simulation_running = False
 
-        # ------- Parâmetros -------
+        # ------- Parâmetros do usuário -------
         self.params = {
             "frequency": 10.0,
             "gain": 12.0,
@@ -42,19 +42,20 @@ class PatchAntennaDesigner:
             "spacing_type": "lambda/2",
             "substrate_material": "Rogers RO4003C (tm)",
             "substrate_thickness": 0.5,   # mm
-            "metal_thickness": 0.035,     # mm (para info/plots)
+            "metal_thickness": 0.035,     # mm
             "er": 3.55,
             "tan_d": 0.0027,
             "feed_position": "edge",
 
-            # Coax (probe-fed com conector completo)
-            "probe_radius": 0.4,            # a (mm) - pino
-            "coax_er": 2.1,                 # PTFE ~2.1
-            "coax_wall_thickness": 0.2,     # espessura da blindagem (mm)
-            "coax_port_length": 3.0         # extensão abaixo do ground (mm) até o plano da porta
+            # Conector coaxial (paramétrico)
+            "probe_radius": 0.4,            # a (mm) - pino interno
+            "coax_er": 2.1,                 # PTFE
+            "coax_wall_thickness": 0.2,     # esp. blindagem (mm)
+            "coax_port_length": 3.0,        # comprimento sob o GND (mm)
+            "antipad_clearance": 0.0        # folga extra no furo do substrato (mm)
         }
 
-        # ------- Calculados -------
+        # ------- Parâmetros calculados -------
         self.calculated_params = {
             "num_patches": 4,
             "spacing": 15.0,
@@ -75,6 +76,7 @@ class PatchAntennaDesigner:
     def setup_gui(self):
         self.window = ctk.CTk()
         self.window.title("Patch Antenna Array Designer")
+               # largura x altura
         self.window.geometry("1200x900")
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.window.grid_columnconfigure(0, weight=1)
@@ -156,9 +158,10 @@ class PatchAntennaDesigner:
                   combo=["lambda/2", "lambda", "0.7*lambda", "0.8*lambda", "0.9*lambda"])
         # Coax
         add_entry("Probe Radius a (mm):", "probe_radius", self.params["probe_radius"])
-        add_entry("Coax εr (dielectric):", "coax_er", self.params["coax_er"])
+        add_entry("Coax εr (PTFE):", "coax_er", self.params["coax_er"])
         add_entry("Shield Wall (mm):", "coax_wall_thickness", self.params["coax_wall_thickness"])
         add_entry("Port Length below GND (mm):", "coax_port_length", self.params["coax_port_length"])
+        add_entry("Anti-pad clearance (mm):", "antipad_clearance", self.params["antipad_clearance"])
         add_entry("Save Project:", "save_project", self.save_project, check=True)
 
         self.entries = entries
@@ -239,7 +242,7 @@ class PatchAntennaDesigner:
         ctk.CTkButton(bf, text="Clear Log", command=self.clear_log).pack(side="left", padx=10, pady=10)
         ctk.CTkButton(bf, text="Save Log", command=self.save_log).pack(side="left", padx=10, pady=10)
 
-    # ------------- Log utils -------------
+    # ------------- utilitários de log -------------
     def log_message(self, message):
         self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
 
@@ -284,7 +287,7 @@ class PatchAntennaDesigner:
         except Exception as e:
             self.log_message(f"Error saving plot: {str(e)}")
 
-    # ----------- Física e Cálculos -----------
+    # ----------- Física / cálculos -----------
     def get_parameters(self):
         self.log_message("Getting parameters from interface")
         for key, widget in self.entries:
@@ -296,7 +299,8 @@ class PatchAntennaDesigner:
                 elif key == "save_project":
                     self.save_project = widget.get()
                 elif key in ["substrate_thickness", "metal_thickness", "er", "tan_d",
-                             "probe_radius", "coax_er", "coax_wall_thickness", "coax_port_length"]:
+                             "probe_radius", "coax_er", "coax_wall_thickness",
+                             "coax_port_length", "antipad_clearance"]:
                     if isinstance(widget, ctk.CTkEntry):
                         self.params[key] = float(widget.get())
                 elif key in ["spacing_type", "substrate_material", "feed_position"]:
@@ -340,6 +344,7 @@ class PatchAntennaDesigner:
             self.calculated_params.update({"patch_length": L_mm, "patch_width": W_mm, "lambda_g": lambda_g_mm})
             self.calculated_params["feed_offset"] = 0.1 * W_mm
 
+            # número de patches a partir do ganho
             G0 = 8.0; desired_gain = float(self.params["gain"])
             n_est = int(math.ceil(10 ** ((desired_gain - G0) / 10.0)))
             n_est = max(1, n_est + (n_est % 2))
@@ -357,7 +362,6 @@ class PatchAntennaDesigner:
 
             self.calculate_substrate_size()
 
-            # Atualiza GUI
             self.patches_label.configure(text=f"Number of Patches: {rows*cols}")
             self.rows_cols_label.configure(text=f"Configuration: {rows} x {cols}")
             self.spacing_label.configure(text=f"Spacing: {spacing_mm:.2f} mm ({self.params['spacing_type']})")
@@ -371,117 +375,130 @@ class PatchAntennaDesigner:
             msg = f"Error in calculation: {str(e)}"
             self.status_label.configure(text=msg); self.log_message(msg); self.log_message(f"Traceback: {traceback.format_exc()}")
 
-    # --------- Utilidades de modelagem ---------
+    # --------- utilidades de modelagem ---------
     def _ensure_material(self, name: str, er: float, tan_d: float):
         try:
             if not self.hfss.materials.checkifmaterialexists(name):
                 self.hfss.materials.add_material(name)
-                m = self.hfss.materials.material_keys[name]
-                m.permittivity = er; m.dielectric_loss_tangent = tan_d
-                self.log_message(f"Created material: {name} (er={er}, tanδ={tan_d})")
+            m = self.hfss.materials.material_keys[name]
+            if hasattr(m, "permittivity"): m.permittivity = er
+            if hasattr(m, "dielectric_loss_tangent"): m.dielectric_loss_tangent = tan_d
+            self.log_message(f"Material ready: {name} (er={er}, tanδ={tan_d})")
         except Exception as e:
             self.log_message(f"Material management warning for '{name}': {e}")
 
-    def _get_face_min_z(self, obj) -> int:
-        """Retorna o ID da face com menor Z (útil para porta na base do dielétrico)."""
-        min_z = 1e9; face_id = None
-        for f in obj.faces:
-            try:
-                cz = f.center[2]
-            except Exception:
-                # fallback via bounding box
-                bb = f.bounding_box
-                cz = 0.5 * (bb[2] + bb[5])
-            if cz < min_z:
-                min_z = cz; face_id = f.id
-        return face_id
-
-    def _create_coax_feed(self, ground, x_feed: float, y_feed: float, h_sub: float,
-                          name_prefix: str):
-        """Cria conector coaxial completo (pino, dielétrico PTFE, blindagem) e tenta Wave Port."""
-        a = float(self.params["probe_radius"])             # inner radius
+    def _set_design_variables(self, L, W, spacing, rows, cols, h_sub, sub_w, sub_l):
+        # Coax (valores NUMÉRICOS em mm para geometria)
+        a = float(self.params["probe_radius"])
         er_cx = float(self.params["coax_er"])
         wall = float(self.params["coax_wall_thickness"])
         Lp = float(self.params["coax_port_length"])
+        clear = float(self.params["antipad_clearance"])
 
-        # Calcula b para ~50 ohms: ln(b/a) = Z0*sqrt(er)/60
+        # 50Ω -> b (aproximação clássica para coax preenchido com er_cx)
         b = a * math.exp(50.0 * math.sqrt(er_cx) / 60.0)
 
-        # Objetos:
+        # Variáveis globais (apenas para visualização/edição)
+        self.hfss["f0"] = f"{self.params['frequency']}GHz"
+        self.hfss["h_sub"] = f"{h_sub}mm"
+        self.hfss["t_met"] = f"{self.params['metal_thickness']}mm"
+        self.hfss["patchL"] = f"{L}mm"
+        self.hfss["patchW"] = f"{W}mm"
+        self.hfss["spacing"] = f"{spacing}mm"
+        self.hfss["rows"] = str(rows)
+        self.hfss["cols"] = str(cols)
+        self.hfss["subW"] = f"{sub_w}mm"
+        self.hfss["subL"] = f"{sub_l}mm"
+        self.hfss["a"] = f"{a}mm"
+        self.hfss["b"] = f"{b}mm"
+        self.hfss["wall"] = f"{wall}mm"
+        self.hfss["Lp"] = f"{Lp}mm"
+        self.hfss["clear"] = f"{clear}mm"
+
+        return a, b, wall, Lp, clear
+
+    def _create_coax_feed_lumped_modal(self, ground, substrate,
+                                       x_feed_mm: float, y_feed_mm: float,
+                                       a: float, b: float, wall: float, Lp: float, clear: float,
+                                       h_sub: float, name_prefix: str):
+        """
+        Coax vertical (Z) com porto lumped para DrivenModal:
+        - pino (raio a), PTFE anular (a..b) em -Lp..0, blindagem (b..b+wall) em -Lp..0
+        - furo no substrato (raio b+clear) e anti-pad no GND
+        - folha retangular (plano ZX em y=y_feed) no dielétrico entre pino e blindagem (sem linha de integração)
+        """
+        eps = 0.05   # "espessura" do retângulo no eixo Z (tamanho do lado Z da folha)
+        zport = -Lp + 0.2  # posição nominal do porto (mm)
+        delta = 0.01  # folga da folha em relação aos metais (mm)
+
+        # PINO: -Lp -> h_sub + eps
         pin = self.hfss.modeler.create_cylinder(
-            "Z", origin=[x_feed, y_feed, -Lp], radius=a, height=h_sub + Lp + 0.001,
-            name=f"{name_prefix}_Pin", material="copper"
+            orientation="Z", origin=[x_feed_mm, y_feed_mm, -Lp], radius=a,
+            height=h_sub + Lp + eps, name=f"{name_prefix}_Pin", material="copper"
         )
-        # Dielétrico PTFE (atravessa ground, substrato e desce até -Lp)
-        diel_mat = "PTFE_Custom"
-        self._ensure_material(diel_mat, er_cx, 0.0002)
-        dielectric = self.hfss.modeler.create_cylinder(
-            "Z", origin=[x_feed, y_feed, -Lp], radius=b, height=h_sub + Lp,
-            name=f"{name_prefix}_PTFE", material=diel_mat
+
+        # PTFE anular
+        ptfe_solid = self.hfss.modeler.create_cylinder(
+            orientation="Z", origin=[x_feed_mm, y_feed_mm, -Lp], radius=b, height=Lp,
+            name=f"{name_prefix}_PTFEsolid", material="PTFE_Custom"
         )
-        # Blindagem (tubo) de -Lp até 0 (faz contato com GND no topo)
+        self.hfss.modeler.subtract(ptfe_solid, pin, keep_originals=False)
+        ptfe = ptfe_solid; ptfe.name = f"{name_prefix}_PTFE"
+
+        # BLINDAGEM
         shield_outer = self.hfss.modeler.create_cylinder(
-            "Z", origin=[x_feed, y_feed, -Lp], radius=b + wall, height=Lp,
+            orientation="Z", origin=[x_feed_mm, y_feed_mm, -Lp], radius=b + wall, height=Lp,
             name=f"{name_prefix}_ShieldOuter", material="copper"
         )
-        shield_inner = self.hfss.modeler.create_cylinder(
-            "Z", origin=[x_feed, y_feed, -Lp], radius=b, height=Lp,
-            name=f"{name_prefix}_ShieldInner", material="vacuum"
+        shield_inner_void = self.hfss.modeler.create_cylinder(
+            orientation="Z", origin=[x_feed_mm, y_feed_mm, -Lp], radius=b, height=Lp,
+            name=f"{name_prefix}_ShieldInnerVoid", material="vacuum"
         )
-        # Transformar em tubo: outer - inner
-        try:
-            self.hfss.modeler.subtract(shield_outer, shield_inner, keep_originals=False)
-        except Exception:
-            pass
-        shield = shield_outer  # tubo resultante
+        self.hfss.modeler.subtract(shield_outer, shield_inner_void, keep_originals=False)
+        shield = shield_outer; shield.name = f"{name_prefix}_Shield"
 
-        # Anti-pad no ground (abertura para o dielétrico/pino)
-        hole = self.hfss.modeler.create_circle(
-            orientation="XY", origin=[x_feed, y_feed, 0.0],
-            radius=b, name=f"{name_prefix}_GndHole", material="vacuum"
+        # FURO NO SUBSTRATO e ANTI-PAD
+        hole_r = b + max(0.0, clear)
+        sub_hole = self.hfss.modeler.create_cylinder(
+            orientation="Z", origin=[x_feed_mm, y_feed_mm, 0.0], radius=hole_r, height=h_sub,
+            name=f"{name_prefix}_SubHole", material="vacuum"
         )
-        try:
-            self.hfss.modeler.subtract(ground, hole, keep_originals=False)
-        except Exception:
-            pass
+        self.hfss.modeler.subtract(substrate, sub_hole, keep_originals=False)
 
-        # ---- Porta de Onda na face inferior do dielétrico ----
-        port_name = f"{name_prefix}_WavePort"
-        created_wave = False
-        try:
-            face_id = self._get_face_min_z(dielectric)  # face no z=-Lp
-            # Integração radial do centro (pino) até o interior da blindagem
-            int_start = [x_feed, y_feed, -Lp]
-            int_stop = [x_feed + (0.8 * b), y_feed, -Lp]
-            self.hfss.wave_port(
-                assignment=face_id,
-                name=port_name,
-                num_modes=1,
-                renormalize=True,
-                integration_line=int_start + int_stop  # [x1,y1,z1,x2,y2,z2]
-            )
-            created_wave = True
-            self.log_message(f"Wave Port '{port_name}' created on dielectric face (coax).")
-        except Exception as e:
-            self.log_message(f"Wave Port creation fallback: {e}")
+        g_hole = self.hfss.modeler.create_circle(
+            orientation="XY", origin=[x_feed_mm, y_feed_mm, 0.0],
+            radius=hole_r, name=f"{name_prefix}_GndHole", material="vacuum"
+        )
+        self.hfss.modeler.subtract(ground, g_hole, keep_originals=False)
 
-        # ---- Fallback: Lumped Port entre pino e blindagem ----
-        if not created_wave:
-            port_sheet = self.hfss.modeler.create_rectangle(
-                orientation="XZ", origin=[x_feed - a, y_feed, -Lp],
-                sizes=[(b + wall) - (x_feed - (x_feed - a)), Lp],  # largura ~ (a->b+wall), altura Lp
-                name=f"{name_prefix}_LumpedSheet", material="vacuum"
-            )
-            self.hfss.lumped_port(
-                assignment=port_sheet.name,
-                reference=shield.name,
-                impedance=50.0,
-                name=f"{name_prefix}_Lumped",
-                renormalize=True
-            )
-            self.log_message(f"Lumped Port '{name_prefix}_Lumped' created between pin and shield (fallback).")
+        # FOLHA DO PORTO: retângulo no plano ZX (y fixo)
+        # Começa um pouco depois do pino (a+delta) e vai até um pouco antes da blindagem (b-delta)
+        x0 = x_feed_mm + a + delta
+        z0 = zport - eps / 2.0
+        width_x = (b - delta) - (a + delta)
+        if width_x <= 0:
+            width_x = max(0.02, b - a) * 0.6  # fallback
 
-        return pin, dielectric, shield
+        port_sheet = self.hfss.modeler.create_rectangle(
+            orientation="ZX",
+            origin=[x0, y_feed_mm, z0],
+            sizes=[width_x, eps],
+            name=f"{name_prefix}_PortSheet",
+            material="vacuum"
+        )
+
+        # Porto Lumped (DrivenModal) — sem linha de integração
+        self.hfss.lumped_port(
+            assignment=port_sheet.name,
+            reference=None,
+            integration_line=None,
+            impedance=50.0,
+            name=f"{name_prefix}_Lumped",
+            renormalize=True
+        )
+        self.log_message(f"Lumped Port (modal) '{name_prefix}_Lumped' created.")
+
+        return pin, ptfe, shield
 
     # ------------- Simulação -------------
     def start_simulation_thread(self):
@@ -523,7 +540,7 @@ class PatchAntennaDesigner:
             self.hfss = ansys.aedt.core.Hfss(
                 project=self.project_name,
                 design="patch_array",
-                solution_type="Terminal",
+                solution_type="DrivenModal",  # Modal
                 version=self.params["aedt_version"],
                 non_graphical=self.params["non_graphical"]
             )
@@ -538,8 +555,9 @@ class PatchAntennaDesigner:
             if sub_mat not in ["Rogers RO4003C (tm)", "FR4_epoxy", "Duroid (tm)", "Air"]:
                 sub_mat = "Custom_Substrate"
             self._ensure_material(sub_mat, er, tan_d)
+            self._ensure_material("PTFE_Custom", float(self.params["coax_er"]), 0.0002)
 
-            # Parâmetros geométricos
+            # Geometria / variáveis
             L = float(self.calculated_params["patch_length"])
             W = float(self.calculated_params["patch_width"])
             spacing = float(self.calculated_params["spacing"])
@@ -549,10 +567,13 @@ class PatchAntennaDesigner:
             sub_w = float(self.calculated_params["substrate_width"])
             sub_l = float(self.calculated_params["substrate_length"])
 
+            # Variáveis de design (e números para geometria)
+            a, b, wall, Lp, clear = self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
+
             # Substrato e Ground
             self.log_message("Creating substrate")
             substrate = self.hfss.modeler.create_box(
-                origin=[-sub_w / 2, -sub_l / 2, 0],
+                origin=[-sub_w/2.0, -sub_l/2.0, 0.0],
                 sizes=[sub_w, sub_l, h_sub],
                 name="Substrate",
                 material=sub_mat
@@ -560,7 +581,7 @@ class PatchAntennaDesigner:
             self.log_message("Creating ground plane")
             ground = self.hfss.modeler.create_rectangle(
                 orientation="XY",
-                origin=[-sub_w / 2, -sub_l / 2, 0],
+                origin=[-sub_w/2.0, -sub_l/2.0, 0.0],
                 sizes=[sub_w, sub_l],
                 name="Ground",
                 material="copper"
@@ -573,7 +594,6 @@ class PatchAntennaDesigner:
             total_length = rows * L + (rows - 1) * spacing
             start_x = -total_width / 2 + W / 2
             start_y = -total_length / 2 + L / 2
-            probe_offset_y = 0.3 * L if self.params["feed_position"] == "edge" else 0.4 * L
 
             self.progress_bar.set(0.4)
             count = 0
@@ -585,7 +605,8 @@ class PatchAntennaDesigner:
                     patch_name = f"Patch_{count}"
                     cx = start_x + c * (W + spacing)
                     cy = start_y + r * (L + spacing)
-                    origin = [cx - W / 2, cy - L / 2, h_sub]
+
+                    origin = [cx - W / 2.0, cy - L / 2.0, h_sub]
                     self.log_message(f"Creating patch {count} at ({r}, {c})")
 
                     patch = self.hfss.modeler.create_rectangle(
@@ -597,21 +618,45 @@ class PatchAntennaDesigner:
                     )
                     patches.append(patch)
 
-                    # Coax completo
+                    # Ponto de feed na borda Y- do patch (offset 0.3*L)
+                    probeOfsY = 0.3 * L
+                    y_feed = cy - L/2.0 + probeOfsY
                     x_feed = cx
-                    y_feed = origin[1] + probe_offset_y
-                    self._create_coax_feed(ground=ground, x_feed=x_feed, y_feed=y_feed,
-                                           h_sub=h_sub, name_prefix=f"P{count}")
+
+                    # Pad de solda
+                    pad = self.hfss.modeler.create_circle(
+                        orientation="XY", origin=[x_feed, y_feed, h_sub],
+                        radius=a, name=f"{patch_name}_Pad", material="copper"
+                    )
+                    try:
+                        self.hfss.modeler.unite([patch, pad])
+                    except Exception:
+                        pass
+
+                    # Coax + Porto Lumped (modal) — sem linha de integração
+                    self._create_coax_feed_lumped_modal(
+                        ground=ground, substrate=substrate,
+                        x_feed_mm=x_feed, y_feed_mm=y_feed,
+                        a=a, b=b, wall=wall, Lp=Lp, clear=clear,
+                        h_sub=h_sub, name_prefix=f"P{count}"
+                    )
 
                     self.progress_bar.set(0.4 + 0.2 * (count / float(rows * cols)))
 
             if self.stop_simulation:
                 self.log_message("Simulation stopped by user"); return
 
+            # Perfect-E no ground (opcional; pode remover se preferir ground “metálico” sem boundary)
+            try:
+                self.hfss.assign_perfecte_to_sheets(ground)
+                self.log_message("Perfect E assigned to Ground")
+            except Exception as e:
+                self.log_message(f"Perfect E assignment warning: {e}")
+
             # Região de ar + radiação
             self.log_message("Creating air region + radiation boundary")
-            pad = max(total_width, total_length) * 0.5 + float(self.params["coax_port_length"]) + 2.0
-            region = self.hfss.modeler.create_region([pad, pad, pad, pad, pad, pad], is_percentage=False)
+            padAir = max(spacing, W, L)/2.0 + Lp + 2.0  # mm
+            region = self.hfss.modeler.create_region([padAir]*6, is_percentage=False)
             self.hfss.assign_radiation_boundary_to_objects(region)
             self.progress_bar.set(0.7)
 
@@ -623,21 +668,31 @@ class PatchAntennaDesigner:
 
             self.log_message("Creating frequency sweep (linear step for 201 points)")
             step = (self.params["sweep_stop"] - self.params["sweep_start"]) / 200.0
-            setup.create_linear_step_sweep(
-                unit="GHz",
-                start_frequency=self.params["sweep_start"],
-                stop_frequency=self.params["sweep_stop"],
-                step_frequency=step,
-                name="Sweep1"
-            )
+            try:
+                setup.create_linear_step_sweep(
+                    unit="GHz",
+                    start_frequency=self.params["sweep_start"],
+                    stop_frequency=self.params["sweep_stop"],
+                    step_size=step,
+                    name="Sweep1"
+                )
+            except Exception as e:
+                self.log_message(f"Linear-step helper not available ({e}). Using interpolating sweep.")
+                setup.create_frequency_sweep(
+                    unit="GHz",
+                    name="Sweep1",
+                    start_frequency=self.params["sweep_start"],
+                    stop_frequency=self.params["sweep_stop"],
+                    sweep_type="Interpolating"
+                )
 
-            # Malha leve nas folhas dos patches
+            # Malha leve nos patches
             self.log_message("Assigning local mesh refinement")
             try:
                 lambda_g_mm = max(1e-6, self.calculated_params["lambda_g"])
-                edge_len = max(lambda_g_mm / 60.0, W / 200.0)
+                edge_len_mm = max(lambda_g_mm / 60.0, W / 200.0)
                 for p in patches:
-                    self.hfss.mesh.assign_length_mesh([p], maximum_length=edge_len)
+                    self.hfss.mesh.assign_length_mesh([p], maximum_length=f"{edge_len_mm:.4f}mm")
             except Exception as e:
                 self.log_message(f"Mesh refinement warning: {e}")
 
@@ -645,7 +700,8 @@ class PatchAntennaDesigner:
             _ = self.hfss.validate_full_design()
 
             self.log_message("Starting analysis")
-            self.hfss.save_project()
+            if self.save_project:
+                self.hfss.save_project()
             self.hfss.analyze_setup("Setup1", cores=self.params["cores"])
 
             if self.stop_simulation:
@@ -671,29 +727,25 @@ class PatchAntennaDesigner:
         try:
             self.log_message("Plotting results")
             self.ax.clear()
-            report = self.hfss.post.reports_by_category.standard(expressions=["dB(S(1,1))"])
-            report.context = ["Setup1 : Sweep1"]
-            sol = report.get_solution_data()
-            if sol:
-                freqs = np.array(sol.primary_sweep_values, dtype=float)
-                s11_list = sol.data_real()
-                if len(s11_list) > 0:
-                    s11 = np.array(s11_list[0], dtype=float)
-                    self.simulation_data = np.column_stack((freqs, s11))
-                    self.ax.plot(freqs, s11, label="S11", linewidth=2)
-                    self.ax.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
-                    self.ax.set_xlabel("Frequency (GHz)"); self.ax.set_ylabel("S-Parameter (dB)")
-                    self.ax.set_title("S11 - Coax-fed Patch Array")
-                    self.ax.legend(); self.ax.grid(True)
-                    cf = float(self.params["frequency"])
-                    self.ax.axvline(x=cf, linestyle='--', alpha=0.7)
-                    self.ax.text(cf + 0.1, self.ax.get_ylim()[1] - 2, f'{cf} GHz')
-                    self.canvas.draw()
-                    self.log_message("Results plotted successfully")
-                else:
-                    self.log_message("No S11 data available for plotting")
-            else:
-                self.log_message("Could not get simulation data")
+            sol = self.hfss.post.get_solution_data(
+                expressions=["dB(S(1,1))"],
+                setup_sweep_name="Setup1 : Sweep1"
+            )
+            if not sol:
+                self.log_message("No solution data returned"); return
+            freqs = np.array(sol.primary_sweep_values, dtype=float)
+            s11 = np.array(sol.data_real()[0], dtype=float)
+            self.simulation_data = np.column_stack((freqs, s11))
+
+            self.ax.plot(freqs, s11, label="S11", linewidth=2)
+            self.ax.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
+            self.ax.set_xlabel("Frequency (GHz)"); self.ax.set_ylabel("S-Parameter (dB)")
+            self.ax.set_title("S11 - Coax-fed Patch Array (Lumped Ports, DrivenModal)")
+            self.ax.legend(); self.ax.grid(True)
+            cf = float(self.params["frequency"])
+            self.ax.axvline(x=cf, linestyle='--', alpha=0.7)
+            self.canvas.draw()
+            self.log_message("Results plotted successfully")
         except Exception as e:
             self.log_message(f"Error plotting results: {str(e)}")
             self.log_message(f"Traceback: {traceback.format_exc()}")
