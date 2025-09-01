@@ -1,12 +1,7 @@
 # ctk_patch_array_hfss.py
-# GUI (CustomTkinter) + PyAEDT para criar e simular um patch com 4 portas (Driven Modal + Lumped Ports)
-# Requisitos:
-#   pip install customtkinter ansys-aedt-core
-#   Ansys Electronics Desktop (HFSS) instalado/licenciado
-# Observação:
-#   - Unidades em mm
-#   - Porto lumped é uma folha vertical (entre ground @ z=0 e trilha/patch @ z=sub_h),
-#     com linha de integração explícita em Z (evita erro "Both endpoints of port lines must lie on the port").
+# GUI (CustomTkinter) + PyAEDT para criar e simular um PATCH parametrizado
+# 4 portas lumped (Driven Modal) em folhas verticais com linha de integração correta.
+# > Requer: Ansys Electronics Desktop (HFSS) instalado/licenciado.
 
 import os
 import sys
@@ -15,100 +10,135 @@ import time
 import tkinter as tk
 from tkinter import messagebox, filedialog
 
+# -------- UI --------
 try:
     import customtkinter as ctk
-except Exception as e:
-    print("Faltando módulo 'customtkinter'. Instale com: pip install customtkinter")
+except Exception:
+    print("Instale o CustomTkinter:  pip install customtkinter")
     raise
 
-# --- PyAEDT ---
+# -------- PyAEDT --------
 try:
     from ansys.aedt.core import Desktop, Hfss
-except Exception as e:
+except Exception:
     Desktop = None
     Hfss = None
 
-APP_TITLE = "HFSS Patch Array • Driven Modal + Lumped Ports (CTk)"
+APP_TITLE = "HFSS Patch Paramétrico • Driven Modal + Lumped Ports (CTk)"
 DEFAULT_PROJECT = "patch_array"
 DEFAULT_DESIGN = "patch_array"
 
-# -----------------------
-# Utilidades de Geometria
-# -----------------------
-def must(obj, msg):
-    """Garante que um objeto foi criado (Object3d/str); levanta erro caso contrário."""
-    if obj is None:
-        raise RuntimeError(msg)
-    # Alguns métodos retornam bool; trate como falha
-    if isinstance(obj, bool):
-        if not obj:
-            raise RuntimeError(msg)
-        # True sem objeto não ajuda
-        raise RuntimeError(f"{msg} (retorno inesperado 'bool')")
-    # Se for string (nome de boundary), considere ok
-    return obj
+# =========================
+# Utilidades de geometria
+# =========================
+def ok_or_raise(val, msg_fail):
+    """Aceita objetos ou True; rejeita None/False."""
+    if val is None or val is False:
+        raise RuntimeError(msg_fail)
+    return val
 
-def add_lumped_port_vertical(hfss, name, center_xy, along_axis="x",
-                             trace_w=2.0, inset=1.0, height_z=1.524):
-    """
-    Cria um Lumped Port como folha vertical:
-      along_axis='x' -> folha está em plano YZ (x fixo), útil para trilha ao longo de X.
-      along_axis='y' -> folha está em plano XZ (y fixo), útil para trilha ao longo de Y.
-    A linha de integração é definida dentro da folha, de z≈0 até z≈height_z.
-    """
-    cx, cy = float(center_xy[0]), float(center_xy[1])
+def mm_expr(value_float):
+    """Converte float -> string com unidade mm."""
+    return f"{float(value_float)}mm"
 
-    if along_axis.lower() == "x":
-        y1 = cy - trace_w / 2.0
-        y2 = cy + trace_w / 2.0
-        x_fixed = cx - float(inset)
+def add_lumped_port_vertical_param(
+    hfss, name, axis, sub_h_var="sub_h", patch_w_var="patch_w",
+    patch_l_var="patch_l", trace_w_var="trace_w", inset_var="port_inset"
+):
+    """
+    Cria uma folha (polyline fechada) vertical para Lumped Port:
+      - axis = 'x_left' | 'x_right' | 'y_bottom' | 'y_top'
+      - usa apenas EXPRESSÕES PARAMÉTRICAS (strings) com mm
+    Integração: reta interna ao plano da folha, de z~0 a z~sub_h.
+    """
+
+    # Coordenadas paramétricas em strings:
+    z0 = "0mm"
+    zh = sub_h_var
+    eps = "0.001mm"
+    tw2 = f"{trace_w_var}/2"
+
+    if axis == "x_left":
+        # x = -patch_w/2 - inset ; y in [-tw/2, +tw/2]
+        xfix = f"(-{patch_w_var}/2 - {inset_var})"
+        y1 = f"-{tw2}"
+        y2 = f"{tw2}"
         pts = [
-            [x_fixed, y1, 0.0],
-            [x_fixed, y2, 0.0],
-            [x_fixed, y2, height_z],
-            [x_fixed, y1, height_z],
-            [x_fixed, y1, 0.0],
+            [xfix, y1, z0],
+            [xfix, y2, z0],
+            [xfix, y2, zh],
+            [xfix, y1, zh],
+            [xfix, y1, z0],
         ]
-        mid = (y1 + y2) / 2.0
-        int_p1 = [x_fixed, mid, 0.001]
-        int_p2 = [x_fixed, mid, height_z - 0.001]
+        int_p1 = [xfix, "0mm", eps]
+        int_p2 = [xfix, "0mm", f"{zh}-{eps}"]
+
+    elif axis == "x_right":
+        xfix = f"({patch_w_var}/2 + {inset_var})"
+        y1 = f"-{tw2}"
+        y2 = f"{tw2}"
+        pts = [
+            [xfix, y1, z0],
+            [xfix, y2, z0],
+            [xfix, y2, zh],
+            [xfix, y1, zh],
+            [xfix, y1, z0],
+        ]
+        int_p1 = [xfix, "0mm", eps]
+        int_p2 = [xfix, "0mm", f"{zh}-{eps}"]
+
+    elif axis == "y_bottom":
+        # y = -patch_l/2 - inset ; x in [-tw/2, +tw/2]
+        yfix = f"(-{patch_l_var}/2 - {inset_var})"
+        x1 = f"-{tw2}"
+        x2 = f"{tw2}"
+        pts = [
+            [x1, yfix, z0],
+            [x2, yfix, z0],
+            [x2, yfix, zh],
+            [x1, yfix, zh],
+            [x1, yfix, z0],
+        ]
+        int_p1 = ["0mm", yfix, eps]
+        int_p2 = ["0mm", yfix, f"{zh}-{eps}"]
+
+    elif axis == "y_top":
+        yfix = f"({patch_l_var}/2 + {inset_var})"
+        x1 = f"-{tw2}"
+        x2 = f"{tw2}"
+        pts = [
+            [x1, yfix, z0],
+            [x2, yfix, z0],
+            [x2, yfix, zh],
+            [x1, yfix, zh],
+            [x1, yfix, z0],
+        ]
+        int_p1 = ["0mm", yfix, eps]
+        int_p2 = ["0mm", yfix, f"{zh}-{eps}"]
+
     else:
-        x1 = cx - trace_w / 2.0
-        x2 = cx + trace_w / 2.0
-        y_fixed = cy - float(inset)
-        pts = [
-            [x1, y_fixed, 0.0],
-            [x2, y_fixed, 0.0],
-            [x2, y_fixed, height_z],
-            [x1, y_fixed, height_z],
-            [x1, y_fixed, 0.0],
-        ]
-        mid = (x1 + x2) / 2.0
-        int_p1 = [mid, y_fixed, 0.001]
-        int_p2 = [mid, y_fixed, height_z - 0.001]
+        raise ValueError("axis inválido")
 
-    port_sheet = must(
-        hfss.modeler.create_polyline(
-            pts, cover_surface=True, closed=True, name=f"{name}_PortSheet"
-        ),
-        f"Falha ao criar folha do porto {name}"
+    sheet = ok_or_raise(
+        hfss.modeler.create_polyline(pts, cover_surface=True, closed=True, name=f"{name}_PortSheet"),
+        f"Falha ao criar {name}_PortSheet"
     )
 
     ok = hfss.lumped_port(
-        assignment=port_sheet.name,
+        assignment=sheet.name,
         reference=None,
         integration_line=[int_p1, int_p2],
         impedance=50.0,
-        name=f"{name}_Lumped",
+        name=name,
         renormalize=True
     )
     if ok is False:
         raise RuntimeError(f"Falha ao atribuir Lumped Port {name}")
-    return port_sheet
+    return sheet
 
-# -----------------------
-# Núcleo de Simulação HFSS
-# -----------------------
+# =========================
+# Núcleo HFSS
+# =========================
 class HFSSPatchRunner:
     def __init__(self, gui, params):
         self.gui = gui
@@ -116,14 +146,14 @@ class HFSSPatchRunner:
         self.d = None
         self.hfss = None
 
-    # Logging seguro na GUI
     def log(self, msg):
         self.gui.append_log(msg)
 
+    # --------- Sessão ---------
     def start_desktop(self):
         if Desktop is None or Hfss is None:
-            raise RuntimeError("PyAEDT não encontrado. Instale 'ansys-aedt-core' e tente novamente.")
-        self.log("Iniciando Electronics Desktop...")
+            raise RuntimeError("PyAEDT não disponível. Instale: pip install ansys-aedt-core")
+        self.log("Iniciando Ansys Electronics Desktop...")
         self.d = Desktop(new_desktop=True, non_graphical=False, close_on_exit=bool(self.p['fechar_ao_sair']))
         self.hfss = Hfss(
             projectname=self.p['project'],
@@ -131,168 +161,209 @@ class HFSSPatchRunner:
             solution_type="DrivenModal"
         )
         self.hfss.modeler.model_units = "mm"
-        self.log("HFSS pronto.")
+        self.log("HFSS aberto e pronto.")
 
-    def build_geometry(self):
+    # --------- Variáveis (parametrização) ---------
+    def declare_vars(self):
+        H = self.hfss
+        # Geometria
+        H["sub_w"]     = mm_expr(self.p['sub_w'])
+        H["sub_l"]     = mm_expr(self.p['sub_l'])
+        H["sub_h"]     = mm_expr(self.p['sub_h'])
+        H["patch_w"]   = mm_expr(self.p['patch_w'])
+        H["patch_l"]   = mm_expr(self.p['patch_l'])
+        H["trace_w"]   = mm_expr(self.p['trace_w'])
+        H["stub_len"]  = mm_expr(self.p['stub_len'])
+        H["port_inset"]= mm_expr(self.p['port_inset'])
+
+        # Região de ar
+        H["air_xm"] = mm_expr(self.p['air_xm'])
+        H["air_xp"] = mm_expr(self.p['air_xp'])
+        H["air_ym"] = mm_expr(self.p['air_ym'])
+        H["air_yp"] = mm_expr(self.p['air_yp'])
+        H["air_zm"] = mm_expr(self.p['air_zm'])
+        H["air_zp"] = mm_expr(self.p['air_zp'])
+
         # Materiais
-        er = float(self.p['er'])
-        tand = float(self.p['tand'])
-        if "Rogers RO4003C (tm)" not in self.hfss.materials.material_keys:
-            self.hfss.materials.add_material("Rogers RO4003C (tm)")
-        m = self.hfss.materials["Rogers RO4003C (tm)"]
-        m.permittivity = er
-        m.dielectric_loss_tangent = tand
+        H["er_sub"]   = str(float(self.p['er']))
+        H["tand_sub"] = str(float(self.p['tand']))
 
-        sub_w = float(self.p['sub_w'])
-        sub_l = float(self.p['sub_l'])
-        sub_h = float(self.p['sub_h'])
-        patch_w = float(self.p['patch_w'])
-        patch_l = float(self.p['patch_l'])
-        trace_w = float(self.p['trace_w'])
-        stub_len = float(self.p['stub_len'])
+    # --------- Materiais ---------
+    def materials(self):
+        H = self.hfss
+        if "Rogers RO4003C (tm)" not in H.materials.material_keys:
+            H.materials.add_material("Rogers RO4003C (tm)")
+        mat = H.materials["Rogers RO4003C (tm)"]
+        mat.permittivity = float(self.p['er'])
+        mat.dielectric_loss_tangent = float(self.p['tand'])
 
-        self.log("Criando Substrate...")
-        sub = must(
-            self.hfss.modeler.create_box(
-                [-sub_w/2.0, -sub_l/2.0, 0.0],
-                [sub_w, sub_l, sub_h],
+    # --------- Geometria ---------
+    def build_geometry(self):
+        self.log("Declarando variáveis...")
+        self.declare_vars()
+
+        self.log("Configurando materiais...")
+        self.materials()
+
+        H = self.hfss
+        # Substrato (box) paramétrico
+        self.log("Criando Substrate (box)...")
+        sub = ok_or_raise(
+            H.modeler.create_box(
+                # origem no centro negativo, em expressões:
+                ["-sub_w/2", "-sub_l/2", "0mm"],
+                ["sub_w", "sub_l", "sub_h"],
                 name="Substrate",
                 matname="Rogers RO4003C (tm)"
-            ), "Falha ao criar Substrate"
+            ),
+            "Falha ao criar Substrate"
         )
 
-        self.log("Criando Ground (sheet @ z=0)...")
-        ground = must(
-            self.hfss.modeler.create_rectangle(
-                cs_plane="XY",
-                position=[-sub_w/2.0, -sub_l/2.0],
-                dimension_list=[sub_w, sub_l],
+        # Ground (sheet XY @ z=0) — API atual requer orientation
+        self.log("Criando Ground (sheet em z=0)...")
+        ground = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["-sub_w/2", "-sub_l/2"],
+                sizes=["sub_w", "sub_l"],
                 name="Ground",
-                is_covered=True
-            ), "Falha ao criar Ground"
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha ao criar Ground"
         )
 
+        # Patch (sheet XY) criado em z=0 e movido para z=sub_h
         self.log("Criando Patch (sheet @ z=sub_h) e trilhas...")
-        patch = must(
-            self.hfss.modeler.create_rectangle(
-                cs_plane="XY",
-                position=[-patch_w/2.0, -patch_l/2.0],
-                dimension_list=[patch_w, patch_l],
+        patch = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["-patch_w/2", "-patch_l/2"],
+                sizes=["patch_w", "patch_l"],
                 name="Patch",
-                is_covered=True
-            ), "Falha ao criar Patch"
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha ao criar Patch"
         )
-        self.hfss.modeler.move([patch], [0, 0, sub_h])
+        H.modeler.move([patch], [ "0mm", "0mm", "sub_h" ])
 
-        # Trilhas
-        left_stub = must(self.hfss.modeler.create_rectangle(
-            cs_plane="XY",
-            position=[-patch_w/2.0 - stub_len, -trace_w/2.0],
-            dimension_list=[stub_len, trace_w],
-            name="Stub_Left", is_covered=True
-        ), "Falha Stub_Left")
-        right_stub = must(self.hfss.modeler.create_rectangle(
-            cs_plane="XY",
-            position=[patch_w/2.0, -trace_w/2.0],
-            dimension_list=[stub_len, trace_w],
-            name="Stub_Right", is_covered=True
-        ), "Falha Stub_Right")
-        bottom_stub = must(self.hfss.modeler.create_rectangle(
-            cs_plane="XY",
-            position=[-trace_w/2.0, -patch_l/2.0 - stub_len],
-            dimension_list=[trace_w, stub_len],
-            name="Stub_Bottom", is_covered=True
-        ), "Falha Stub_Bottom")
-        top_stub = must(self.hfss.modeler.create_rectangle(
-            cs_plane="XY",
-            position=[-trace_w/2.0, patch_l/2.0],
-            dimension_list=[trace_w, stub_len],
-            name="Stub_Top", is_covered=True
-        ), "Falha Stub_Top")
+        # Trilhas (sheets XY) — todas em z=sub_h
+        left_stub = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["-patch_w/2 - stub_len", "-trace_w/2"],
+                sizes=["stub_len", "trace_w"],
+                name="Stub_Left",
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha Stub_Left"
+        )
+        right_stub = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["patch_w/2", "-trace_w/2"],
+                sizes=["stub_len", "trace_w"],
+                name="Stub_Right",
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha Stub_Right"
+        )
+        bottom_stub = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["-trace_w/2", "-patch_l/2 - stub_len"],
+                sizes=["trace_w", "stub_len"],
+                name="Stub_Bottom",
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha Stub_Bottom"
+        )
+        top_stub = ok_or_raise(
+            H.modeler.create_rectangle(
+                origin=["-trace_w/2", "patch_l/2"],
+                sizes=["trace_w", "stub_len"],
+                name="Stub_Top",
+                is_covered=True,
+                orientation="XY"
+            ),
+            "Falha Stub_Top"
+        )
+        H.modeler.move([left_stub, right_stub, bottom_stub, top_stub], ["0mm", "0mm", "sub_h"])
+        H.modeler.unite([patch, left_stub, right_stub, bottom_stub, top_stub])
 
-        self.hfss.modeler.move([left_stub, right_stub, bottom_stub, top_stub], [0, 0, sub_h])
-        # Une o condutor principal
-        self.hfss.modeler.unite([patch, left_stub, right_stub, bottom_stub, top_stub])
-
-        # Guarda para outros métodos
-        self.sub_h = sub_h
-        self.trace_w = trace_w
-        self.patch_w = patch_w
-        self.patch_l = patch_l
+        # Guarda referências
         self.ground = ground
         self.patch = patch
 
+    # --------- Portas e Boundaries ---------
     def ports_and_boundaries(self):
-        inset = float(self.p['port_inset'])
-        # 4 portas — centros ao redor do patch
-        self.log("Criando Lumped Ports...")
-        add_lumped_port_vertical(self.hfss, "P1", center_xy=[-self.patch_w/2.0, 0.0], along_axis="x",
-                                 trace_w=self.trace_w, inset=inset, height_z=self.sub_h)
-        add_lumped_port_vertical(self.hfss, "P2", center_xy=[ self.patch_w/2.0, 0.0], along_axis="x",
-                                 trace_w=self.trace_w, inset=inset, height_z=self.sub_h)
-        add_lumped_port_vertical(self.hfss, "P3", center_xy=[0.0, -self.patch_l/2.0], along_axis="y",
-                                 trace_w=self.trace_w, inset=inset, height_z=self.sub_h)
-        add_lumped_port_vertical(self.hfss, "P4", center_xy=[0.0,  self.patch_l/2.0], along_axis="y",
-                                 trace_w=self.trace_w, inset=inset, height_z=self.sub_h)
+        H = self.hfss
+        self.log("Criando Lumped Ports paramétricos (folhas verticais)...")
+        add_lumped_port_vertical_param(H, "P1", "x_left")
+        add_lumped_port_vertical_param(H, "P2", "x_right")
+        add_lumped_port_vertical_param(H, "P3", "y_bottom")
+        add_lumped_port_vertical_param(H, "P4", "y_top")
 
-        # Ground como Perfect E
-        self.log("Atribuindo Perfect E ao Ground...")
-        must(self.hfss.assign_perfecte_to_sheets(self.ground), "Falha ao aplicar PerfectE no Ground")
+        self.log("Atribuindo PerfectE ao Ground...")
+        H.assign_perfecte_to_sheets(self.ground)
 
-        # Região + Radiação
-        pad_air = [
-            float(self.p['air_xm']), float(self.p['air_xp']),
-            float(self.p['air_ym']), float(self.p['air_yp']),
-            float(self.p['air_zm']), float(self.p['air_zp']),
-        ]
-        self.log("Criando região de ar e Radiation...")
-        region = must(self.hfss.modeler.create_region(pad_air, is_percentage=False), "Falha ao criar região de ar")
-        must(self.hfss.assign_radiation_boundary_to_objects(region), "Falha ao aplicar Radiation")
+        # Região de ar absoluta (mm). create_region nomeia como "Region"
+        self.log("Criando região de ar (absoluta, mm) e boundary Radiation...")
+        # Ordem: [-X, +X, -Y, +Y, -Z, +Z]
+        region = H.modeler.create_region(
+            ["air_xm", "air_xp", "air_ym", "air_yp", "air_zm", "air_zp"],
+            is_percentage=False
+        )
+        # Independente do retorno, aplicamos Radiaton ao objeto "Region"
+        H.assign_radiation_boundary_to_objects("Region")
 
+    # --------- Setup & Solve ---------
     def setup_and_solve(self):
+        H = self.hfss
         f0 = float(self.p['f0'])
-        f1 = float(self.p['fs'])
-        f2 = float(self.p['fe'])
-        df = float(self.p['fd'])
+        fs = float(self.p['fs'])
+        fe = float(self.p['fe'])
+        fd = float(self.p['fd'])
 
-        self.log("Criando Setup e Sweep...")
-        setup = self.hfss.create_setup("Setup1")
+        self.log("Criando Setup 'Setup1' e Sweep 'Sweep1'...")
+        setup = H.create_setup("Setup1")
         setup.props["Frequency"] = f"{f0}GHz"
         setup.props["MaxDeltaS"] = 0.02
         setup.update()
 
-        sw = setup.create_linear_step_sweep(
-            name="Sweep1", unit="GHz",
-            start_frequency=f1, stop_frequency=f2, step_size=df,
+        sweep = setup.create_linear_step_sweep(
+            name="Sweep1",
+            unit="GHz",
+            start_frequency=fs,
+            stop_frequency=fe,
+            step_size=fd,
             sweep_type="Interpolating"
         )
-        sw.props["SaveFields"] = False
-        sw.update()
+        sweep.update()
 
-        # Mesh mais fina no patch
+        # Malha fina no patch
         try:
-            edge_len = max(self.trace_w, 0.5) / 6.0
-            self.hfss.mesh.assign_length_mesh([self.patch], maximum_length=f"{edge_len:.3f}mm")
+            H.mesh.assign_length_mesh([self.patch], maximum_length="(trace_w/6)")
         except Exception:
             pass
 
-        self.log("Rodando análise...")
-        self.hfss.analyze_setup("Setup1")
-        self.log("Análise concluída.")
+        self.log("Rodando simulação...")
+        H.analyze_setup("Setup1")
+        self.log("Simulação concluída.")
 
-    def export_sparams(self):
-        # salva S11.png e Touchstone
+    # --------- Export ---------
+    def export(self):
+        H = self.hfss
         try:
-            self.log("Exportando S-parâmetros e S11.png...")
-            tdms = os.path.join(self.hfss.working_directory, f"{self.p['design']}.s2p")
-            self.hfss.save_touchstone()
-            plot = self.hfss.post.create_report(expressions="dB(S(1,1))", report_category="S Parameter")
-            img = os.path.join(self.hfss.working_directory, "S11.png")
-            self.hfss.post.export_report_to_png(plot, img, orientation="landscape", width=1200, height=800)
-            self.log(f"OK • Touchstone/S11 em: {self.hfss.working_directory}")
+            self.log("Exportando Touchstone e gráfico S11...")
+            H.save_touchstone()  # salva em working_directory
+            rep = H.post.create_report("dB(S(1,1))", report_category="S Parameter")
+            png = os.path.join(H.working_directory, "S11.png")
+            H.post.export_report_to_png(rep, png, width=1400, height=900)
+            self.log(f"OK • Arquivos: {H.working_directory}")
         except Exception as e:
-            self.log(f"Aviso: não foi possível exportar gráficos. {e}")
+            self.log(f"Aviso na exportação: {e}")
 
+    # --------- Fluxo total ---------
     def run(self):
         try:
             self.gui.set_running(True)
@@ -300,70 +371,65 @@ class HFSSPatchRunner:
             self.build_geometry()
             self.ports_and_boundaries()
             self.setup_and_solve()
-            self.export_sparams()
+            self.export()
             self.log("FINALIZADO ✓")
         except Exception as e:
             self.log(f"ERRO: {e}")
             messagebox.showerror("Erro na simulação", str(e))
         finally:
             self.gui.set_running(False)
-            if self.d and self.p['fechar_ao_sair']:
-                # Desktop fechará automaticamente por close_on_exit=True
-                pass
+            # close_on_exit já definido no Desktop
 
-# -----------------------
+# =========================
 # GUI (CustomTkinter)
-# -----------------------
+# =========================
 class PatchGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
         self.title(APP_TITLE)
-        self.geometry("1080x720")
-        self.minsize(980, 640)
+        self.geometry("1120x740")
+        self.minsize(1000, 680)
 
-        # Estado
         self.running = False
 
-        # --------- Layout base ----------
-        self.columnconfigure(0, weight=0)  # sidebar
-        self.columnconfigure(1, weight=1)  # main
+        # Layout base
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        # Sidebar – ações
+        # Sidebar
         self.sidebar = ctk.CTkFrame(self, corner_radius=16)
         self.sidebar.grid(row=0, column=0, sticky="nsw", padx=14, pady=14)
         self.sidebar.grid_rowconfigure(10, weight=1)
 
-        self.title_lbl = ctk.CTkLabel(self.sidebar, text=APP_TITLE, wraplength=260, justify="left",
-                                      font=ctk.CTkFont(size=16, weight="bold"))
-        self.title_lbl.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="w")
+        ctk.CTkLabel(self.sidebar, text=APP_TITLE, wraplength=260, justify="left",
+                     font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, padx=12, pady=(12,6), sticky="w")
 
-        self.btn_run = ctk.CTkButton(self.sidebar, text="▶ Criar e Simular", command=self.on_run, height=42)
-        self.btn_run.grid(row=1, column=0, padx=12, pady=(6, 6), sticky="ew")
+        self.btn_run = ctk.CTkButton(self.sidebar, text="▶ Criar e Simular", height=44, command=self.on_run)
+        self.btn_run.grid(row=1, column=0, padx=12, pady=(6,6), sticky="ew")
 
         self.btn_save = ctk.CTkButton(self.sidebar, text="💾 Salvar Projeto .aedt", command=self.on_save_project)
         self.btn_save.grid(row=2, column=0, padx=12, pady=6, sticky="ew")
 
-        self.open_dir_btn = ctk.CTkButton(self.sidebar, text="📂 Abrir Pasta de Trabalho",
-                                          command=self.on_open_workdir)
-        self.open_dir_btn.grid(row=3, column=0, padx=12, pady=6, sticky="ew")
+        self.btn_open = ctk.CTkButton(self.sidebar, text="📂 Abrir Pasta de Trabalho", command=self.on_open_workdir)
+        self.btn_open.grid(row=3, column=0, padx=12, pady=6, sticky="ew")
 
         self.chk_close = ctk.CTkCheckBox(self.sidebar, text="Fechar HFSS ao sair", onvalue=True, offvalue=False)
         self.chk_close.select()
-        self.chk_close.grid(row=4, column=0, padx=12, pady=(6, 12), sticky="w")
+        self.chk_close.grid(row=4, column=0, padx=12, pady=(6,12), sticky="w")
 
         self.progress = ctk.CTkProgressBar(self.sidebar)
         self.progress.set(0)
-        self.progress.grid(row=5, column=0, padx=12, pady=(6, 12), sticky="ew")
+        self.progress.grid(row=5, column=0, padx=12, pady=(6,12), sticky="ew")
 
         self.status = ctk.CTkLabel(self.sidebar, text="Pronto", anchor="w")
-        self.status.grid(row=6, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.status.grid(row=6, column=0, padx=12, pady=(0,12), sticky="ew")
 
-        # --------- Área principal: abas ----------
+        # Abas
         self.tabs = ctk.CTkTabview(self)
-        self.tabs.grid(row=0, column=1, sticky="nsew", padx=(0, 14), pady=14)
+        self.tabs.grid(row=0, column=1, sticky="nsew", padx=(0,14), pady=14)
 
         self.tab_proj = self.tabs.add(" Projeto ")
         self.tab_geom = self.tabs.add(" Geometria ")
@@ -371,94 +437,83 @@ class PatchGUI(ctk.CTk):
         self.tab_solve = self.tabs.add(" Setup & Sweep ")
         self.tab_log = self.tabs.add(" Logs ")
 
-        # --- Projeto ---
         self._build_tab_project()
-
-        # --- Geometria ---
         self._build_tab_geometry()
-
-        # --- Portas & Região ---
         self._build_tab_ports_region()
-
-        # --- Setup & Sweep ---
         self._build_tab_solve()
 
-        # --- Logs ---
-        self.log_box = ctk.CTkTextbox(self.tab_log, height=400)
+        # Logs
+        self.log_box = ctk.CTkTextbox(self.tab_log)
         self.log_box.pack(fill="both", expand=True, padx=12, pady=12)
-
         self.append_log("Bem-vindo! Ajuste os parâmetros e clique em 'Criar e Simular'.")
 
-    # ---------- Construção das abas ----------
+    # ---- Seções das abas ----
     def _build_tab_project(self):
         f = ctk.CTkFrame(self.tab_proj)
         f.pack(fill="x", padx=12, pady=12)
-
         self.entry_project = self._labeled_entry(f, "Nome do projeto (.aedt):", DEFAULT_PROJECT)
-        self.entry_design = self._labeled_entry(f, "Nome do design:", DEFAULT_DESIGN)
+        self.entry_design  = self._labeled_entry(f, "Nome do design:", DEFAULT_DESIGN)
 
     def _build_tab_geometry(self):
         grid = ctk.CTkFrame(self.tab_geom)
         grid.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # Substrato
-        sub_frame = self._section(grid, "Substrato (RO4003C)")
-        self.entry_sub_w = self._labeled_entry(sub_frame, "Largura (mm):", "60.0")
-        self.entry_sub_l = self._labeled_entry(sub_frame, "Comprimento (mm):", "60.0")
-        self.entry_sub_h = self._labeled_entry(sub_frame, "Altura h (mm):", "1.524")
-        self.entry_er = self._labeled_entry(sub_frame, "εr:", "3.55")
-        self.entry_tand = self._labeled_entry(sub_frame, "tanδ:", "0.0027")
+        sub = self._section(grid, "Substrato (RO4003C) — Paramétrico")
+        self.entry_sub_w = self._labeled_entry(sub, "Largura sub_w (mm):", "60.0")
+        self.entry_sub_l = self._labeled_entry(sub, "Comprimento sub_l (mm):", "60.0")
+        self.entry_sub_h = self._labeled_entry(sub, "Altura sub_h (mm):", "1.524")
+        self.entry_er    = self._labeled_entry(sub, "εr:", "3.55")
+        self.entry_tand  = self._labeled_entry(sub, "tanδ:", "0.0027")
 
-        # Patch
-        patch_frame = self._section(grid, "Patch")
-        self.entry_patch_w = self._labeled_entry(patch_frame, "Largura Wp (mm):", "28.0")
-        self.entry_patch_l = self._labeled_entry(patch_frame, "Comprimento Lp (mm):", "22.0")
+        patch = self._section(grid, "Patch — Paramétrico")
+        self.entry_patch_w = self._labeled_entry(patch, "Largura patch_w (mm):", "28.0")
+        self.entry_patch_l = self._labeled_entry(patch, "Compr. patch_l (mm):", "22.0")
 
-        # Trilhas
-        trace_frame = self._section(grid, "Trilhas (microstrip)")
-        self.entry_trace_w = self._labeled_entry(trace_frame, "Largura trilha (mm):", "2.0")
-        self.entry_stub_len = self._labeled_entry(trace_frame, "Comprimento stub (mm):", "5.0")
+        trace = self._section(grid, "Trilhas (microstrip) — Paramétrico")
+        self.entry_trace_w = self._labeled_entry(trace, "Largura trace_w (mm):", "2.0")
+        self.entry_stub_len= self._labeled_entry(trace, "Compr. stub_len (mm):", "5.0")
 
     def _build_tab_ports_region(self):
         grid = ctk.CTkFrame(self.tab_ports)
         grid.pack(fill="both", expand=True, padx=12, pady=12)
 
-        ports_frame = self._section(grid, "Lumped Ports (verticais, Driven Modal)")
-        self.entry_port_inset = self._labeled_entry(ports_frame, "Inset do porto (mm):", "1.0")
-        ctk.CTkLabel(ports_frame, text="Os 4 portos (P1..P4) são criados automaticamente.").pack(anchor="w", padx=6, pady=4)
+        ports = self._section(grid, "Lumped Ports (Driven Modal)")
+        self.entry_port_inset = self._labeled_entry(ports, "port_inset (mm):", "1.0")
+        ctk.CTkLabel(ports, text="P1/P2 nas laterais (X), P3/P4 topo/base (Y).").pack(anchor="w", padx=6, pady=4)
 
-        air_frame = self._section(grid, "Região de Ar (distâncias absolutas em mm)")
-        self.entry_air_xm = self._labeled_entry(air_frame, "-X (mm):", "10.0")
-        self.entry_air_xp = self._labeled_entry(air_frame, "+X (mm):", "10.0")
-        self.entry_air_ym = self._labeled_entry(air_frame, "-Y (mm):", "10.0")
-        self.entry_air_yp = self._labeled_entry(air_frame, "+Y (mm):", "10.0")
-        self.entry_air_zm = self._labeled_entry(air_frame, "-Z (mm):", "20.0")
-        self.entry_air_zp = self._labeled_entry(air_frame, "+Z (mm):", "20.0")
+        reg = self._section(grid, "Região de Ar (absoluta, mm)")
+        self.entry_air_xm = self._labeled_entry(reg, "air_xm (−X, mm):", "10.0")
+        self.entry_air_xp = self._labeled_entry(reg, "air_xp (+X, mm):", "10.0")
+        self.entry_air_ym = self._labeled_entry(reg, "air_ym (−Y, mm):", "10.0")
+        self.entry_air_yp = self._labeled_entry(reg, "air_yp (+Y, mm):", "10.0")
+        self.entry_air_zm = self._labeled_entry(reg, "air_zm (−Z, mm):", "20.0")
+        self.entry_air_zp = self._labeled_entry(reg, "air_zp (+Z, mm):", "20.0")
 
     def _build_tab_solve(self):
         grid = ctk.CTkFrame(self.tab_solve)
         grid.pack(fill="x", padx=12, pady=12)
 
-        freq_frame = self._section(grid, "Frequências (GHz)")
-        self.entry_f0 = self._labeled_entry(freq_frame, "Frequência do Setup:", "10.0")
-        sweep = self._section(grid, "Sweep Linear/Interpolating (GHz)")
-        self.entry_fs = self._labeled_entry(sweep, "Início:", "8.0")
-        self.entry_fe = self._labeled_entry(sweep, "Fim:", "12.0")
-        self.entry_fd = self._labeled_entry(sweep, "Passo:", "0.05")
+        fset = self._section(grid, "Setup em GHz")
+        self.entry_f0 = self._labeled_entry(fset, "Frequência do Setup (GHz):", "10.0")
 
-    # ---------- Helpers de UI ----------
+        swp = self._section(grid, "Sweep Linear / Interpolating (GHz)")
+        self.entry_fs = self._labeled_entry(swp, "Início fs:", "8.0")
+        self.entry_fe = self._labeled_entry(swp, "Fim fe:", "12.0")
+        self.entry_fd = self._labeled_entry(swp, "Passo fd:", "0.05")
+
+    # ---- Helpers UI ----
     def _section(self, master, title):
         frame = ctk.CTkFrame(master, corner_radius=14)
         frame.pack(fill="x", padx=6, pady=6)
-        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=8, pady=(8, 4))
+        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=8, pady=(8,4))
         inner = ctk.CTkFrame(frame, fg_color="transparent")
-        inner.pack(fill="x", padx=8, pady=(0, 8))
+        inner.pack(fill="x", padx=8, pady=(0,8))
         return inner
 
     def _labeled_entry(self, master, label, default=""):
         row = ctk.CTkFrame(master, fg_color="transparent")
         row.pack(fill="x", pady=4)
-        ctk.CTkLabel(row, text=label, width=220, anchor="w").pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(row, text=label, width=230, anchor="w").pack(side="left", padx=(0,8))
         entry = ctk.CTkEntry(row)
         entry.insert(0, str(default))
         entry.pack(side="left", fill="x", expand=True)
@@ -473,18 +528,19 @@ class PatchGUI(ctk.CTk):
 
     def set_running(self, running: bool):
         self.running = running
-        self.btn_run.configure(state=("disabled" if running else "normal"))
-        self.btn_save.configure(state=("disabled" if running else "normal"))
-        self.open_dir_btn.configure(state=("disabled" if running else "normal"))
-        self.progress.set(0.3 if running else 0.0)
-        self.status.configure(text=("Processando..." if running else "Pronto"))
+        state = "disabled" if running else "normal"
+        self.btn_run.configure(state=state)
+        self.btn_save.configure(state=state)
+        self.btn_open.configure(state=state)
+        self.progress.set(0.35 if running else 0.0)
+        self.status.configure(text="Processando..." if running else "Pronto")
 
-    # ---------- Ações ----------
+    # ---- Ações ----
     def collect_params(self):
         try:
-            p = {
+            return {
                 "project": self.entry_project.get().strip() or DEFAULT_PROJECT,
-                "design": self.entry_design.get().strip() or DEFAULT_DESIGN,
+                "design":  self.entry_design.get().strip() or DEFAULT_DESIGN,
                 "sub_w": float(self.entry_sub_w.get()),
                 "sub_l": float(self.entry_sub_l.get()),
                 "sub_h": float(self.entry_sub_h.get()),
@@ -505,11 +561,10 @@ class PatchGUI(ctk.CTk):
                 "fs": float(self.entry_fs.get()),
                 "fe": float(self.entry_fe.get()),
                 "fd": float(self.entry_fd.get()),
-                "fechar_ao_sair": bool(self.chk_close.get()),
+                "fechar_ao_sair": True if self.chk_close.get() else False,
             }
         except ValueError as e:
             raise RuntimeError(f"Parâmetro inválido: {e}")
-        return p
 
     def on_run(self):
         if self.running:
@@ -527,27 +582,27 @@ class PatchGUI(ctk.CTk):
         threading.Thread(target=_task, daemon=True).start()
 
     def on_save_project(self):
-        # salva a .aedt no local escolhido (o HFSS salvará ao encerrar)
-        folder = filedialog.askdirectory(title="Escolha a pasta para salvar o projeto .aedt")
+        folder = filedialog.askdirectory(title="Escolha a pasta para salvar")
         if not folder:
             return
-        # Apenas informa — o PyAEDT salva durante a sessão; após rodar, peça para salvar manualmente se preciso.
-        messagebox.showinfo("Salvar Projeto", "Após a simulação, use 'File > Save' no HFSS para gravar na pasta escolhida.")
+        messagebox.showinfo(
+            "Salvar .aedt",
+            "Após a simulação, use File > Save no HFSS para gravar o projeto na pasta escolhida."
+        )
 
     def on_open_workdir(self):
         try:
-            # Tenta abrir a pasta temp do usuário – melhor após criar a sessão.
-            path = os.path.expanduser("~")
+            base = os.path.expanduser("~")
             if sys.platform.startswith("win"):
-                os.startfile(path)
+                os.startfile(base)
             elif sys.platform == "darwin":
-                os.system(f'open "{path}"')
+                os.system(f'open "{base}"')
             else:
-                os.system(f'xdg-open "{path}"')
+                os.system(f'xdg-open "{base}"')
         except Exception as e:
-            messagebox.showwarning("Não foi possível abrir a pasta", str(e))
+            messagebox.showwarning("Falha ao abrir pasta", str(e))
 
-
+# Entrypoint
 def main():
     app = PatchGUI()
     app.mainloop()

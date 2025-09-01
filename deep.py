@@ -718,14 +718,50 @@ class ModernPatchAntennaDesigner:
         self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
 
         # Lumped Port (referência = blindagem)
-        self.hfss.lumped_port(
-            assignment=port_ring.name,
-            reference=shield.name,
-            impedance=50.0,
-            name=f"{name_prefix}_Lumped",
-            renormalize=True
-        )
-        self.log_message(f"Lumped Port '{name_prefix}_Lumped' created.")
+        # Verificar se os objetos foram criados corretamente antes de criar o porto
+        try:
+            # Usar a API mais recente do PyAEDT para criar portos
+            port = self.hfss.create_lumped_port_to_sheet(
+                sheet_name=port_ring.name,
+                axisdir=0,  # 0=X, 1=Y, 2=Z
+                impedance=50.0,
+                portname=f"{name_prefix}_Lumped",
+                renormalize=True
+            )
+            self.log_message(f"Lumped Port '{name_prefix}_Lumped' created using new API.")
+        except Exception as e:
+            self.log_message(f"Error creating lumped port with new API: {str(e)}")
+            # Tentar método alternativo
+            try:
+                # Obter a face do shield para usar como referência
+                shield_faces = shield.faces
+                if shield_faces:
+                    # Usar a face superior do shield como referência
+                    ref_face = shield_faces[0].id
+                    port = self.hfss.lumped_port(
+                        assignment=port_ring.name,
+                        reference=[ref_face],
+                        impedance=50.0,
+                        name=f"{name_prefix}_Lumped",
+                        renormalize=True
+                    )
+                    self.log_message(f"Lumped Port '{name_prefix}_Lumped' created using face reference.")
+            except Exception as e2:
+                self.log_message(f"Error creating lumped port with face reference: {str(e2)}")
+                # Último recurso: criar um porto simples
+                try:
+                    port = self.hfss.lumped_port(
+                        assignment=port_ring.name,
+                        reference=shield.name,
+                        impedance=50.0,
+                        name=f"{name_prefix}_Lumped",
+                        renormalize=True
+                    )
+                    self.log_message(f"Lumped Port '{name_prefix}_Lumped' created with direct reference.")
+                except Exception as e3:
+                    self.log_message(f"Final error creating lumped port: {str(e3)}")
+                    return pin, ptfe, None
+
         return pin, ptfe, shield
 
     # ------------- Simulação -------------
@@ -871,13 +907,16 @@ class ModernPatchAntennaDesigner:
                     # Coax completo + Lumped Port
                     x_feed = cx
                     y_feed = cy - L/2 + 0.3*L  # Usando valor numérico em vez de expressão
-                    self._create_coax_feed_lumped(
+                    pin, ptfe, shield = self._create_coax_feed_lumped(
                         ground=ground, 
                         substrate=substrate,
                         x_feed=x_feed, 
                         y_feed=y_feed,
                         name_prefix=f"P{count}"
                     )
+
+                    if shield is None:
+                        self.log_message(f"Warning: Shield for P{count} was not created correctly")
 
                     self.progress_bar.set(0.4 + 0.2 * (count / float(rows * cols)))
 
