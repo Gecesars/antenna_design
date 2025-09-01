@@ -623,7 +623,7 @@ class ModernPatchAntennaDesigner:
         """
         Constrói: Pino (a), PTFE anular (a..b) em -Lp..0, blindagem (b..b+wall) em -Lp..0,
         furo no substrato (raio b+clear) 0..h_sub, anti-pad no GND,
-        e cria Lumped Port (folha retangular tipo spoke) no plano XZ, conectando o pino à blindagem.
+        e cria Lumped Port (anel) em z=-Lp.
         """
         # Obter valores numéricos
         a_val = float(self.params["probe_radius"])
@@ -700,20 +700,26 @@ class ModernPatchAntennaDesigner:
         )
         self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
 
-        # PORTA LUMPED: folha retangular (spoke) no plano XZ, conectando o pino à blindagem
-        # A folha vai de (x_feed + a_val, y_feed, -Lp_val) até (x_feed + b_val, y_feed, -Lp_val)
-        # E tem uma largura pequena em Y (por exemplo, 0.01 mm)
-        width = 0.01
-        port_sheet = self.hfss.modeler.create_rectangle(
-            orientation="XZ",
-            origin=[x_feed + a_val, y_feed - width/2, -Lp_val],
-            sizes=[b_val - a_val, width],
-            name=f"{name_prefix}_PortSheet"
+        # PORTA LUMPED: anel entre raio a e b em z=-Lp
+        port_ring = self.hfss.modeler.create_circle(
+            orientation="XY", 
+            origin=[x_feed, y_feed, -Lp_val], 
+            radius=b_val,
+            name=f"{name_prefix}_PortRing", 
+            material="vacuum"
         )
+        port_hole = self.hfss.modeler.create_circle(
+            orientation="XY", 
+            origin=[x_feed, y_feed, -Lp_val], 
+            radius=a_val,
+            name=f"{name_prefix}_PortHole", 
+            material="vacuum"
+        )
+        self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
 
         # Lumped Port (referência = blindagem)
         self.hfss.lumped_port(
-            assignment=port_sheet.name,
+            assignment=port_ring.name,
             reference=shield.name,
             impedance=50.0,
             name=f"{name_prefix}_Lumped",
@@ -766,7 +772,7 @@ class ModernPatchAntennaDesigner:
             self.hfss = ansys.aedt.core.Hfss(
                 project=self.project_name,
                 design="patch_array",
-                solution_type="DrivenModal",  # Alterado para DrivenModal
+                solution_type="DrivenModal",
                 version=self.params["aedt_version"],
                 non_graphical=self.params["non_graphical"]
             )
@@ -851,8 +857,11 @@ class ModernPatchAntennaDesigner:
                     # probeOfsY = probeK * patchL
                     self.hfss["probeOfsY"] = "probeK*patchL"
                     pad = self.hfss.modeler.create_circle(
-                        orientation="XY", origin=[cx, f"{cy}-patchL/2+probeOfsY", "h_sub"],
-                        radius="a", name=f"{patch_name}_Pad", material="copper"
+                        orientation="XY", 
+                        origin=[cx, f"{cy}-patchL/2+probeOfsY", "h_sub"],
+                        radius="a", 
+                        name=f"{patch_name}_Pad", 
+                        material="copper"
                     )
                     try:
                         self.hfss.modeler.unite([patch, pad])
@@ -861,11 +870,12 @@ class ModernPatchAntennaDesigner:
 
                     # Coax completo + Lumped Port
                     x_feed = cx
-                    # y_feed = cy - L/2 + probeOfsY  (expressão)
-                    y_feed_expr = f"{cy}-patchL/2+probeOfsY"
+                    y_feed = cy - L/2 + 0.3*L  # Usando valor numérico em vez de expressão
                     self._create_coax_feed_lumped(
-                        ground=ground, substrate=substrate,
-                        x_feed=x_feed, y_feed=cy - L/2 + 0.3*L,  # Usando valor numérico em vez de expressão
+                        ground=ground, 
+                        substrate=substrate,
+                        x_feed=x_feed, 
+                        y_feed=y_feed,
                         name_prefix=f"P{count}"
                     )
 
@@ -877,8 +887,15 @@ class ModernPatchAntennaDesigner:
 
             # Região de ar + radiação (paramétrica)
             self.log_message("Creating air region + radiation boundary")
-            region_size = max(sub_w, sub_l) * 0.5  # 50% maior que o substrato
-            region = self.hfss.modeler.create_region([region_size] * 6, is_percentage=False)
+            # Calcular o comprimento de onda no ar para a frequência mais baixa
+            lambda0 = self.c / (self.params["sweep_start"] * 1e9) * 1000  # mm
+            region_size = lambda0 / 4  # λ/4 em todas as direções
+            
+            # Criar região de ar com dimensões corretas
+            region = self.hfss.modeler.create_region(
+                [region_size, region_size, region_size, region_size, region_size, region_size],
+                is_percentage=False
+            )
             self.hfss.assign_radiation_boundary_to_objects(region)
             self.progress_bar.set(0.7)
 
