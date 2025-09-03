@@ -126,7 +126,7 @@ class ModernPatchAntennaDesigner:
         self.process_log_queue()
 
     def create_section(self, parent, title, row, column, padx=10, pady=10):
-        """Cria uma seção com título and borda"""
+        """Cria uma seção com título e borda"""
         section_frame = ctk.CTkFrame(parent, fg_color=("gray92", "gray18"))
         section_frame.grid(row=row, column=column, sticky="nsew", padx=padx, pady=pady)
         section_frame.grid_columnconfigure(0, weight=1)
@@ -522,7 +522,7 @@ class ModernPatchAntennaDesigner:
         c = self.calculated_params["cols"]
         total_w = c * W + (c - 1) * s
         total_l = r * L + (r - 1) * s
-        margin = max(total_w, total_l) * 0.2
+        margin = max(total_w, total_l) * 0.4  # Aumentada para 40%
         self.calculated_params["substrate_width"] = total_w + 2 * margin
         self.calculated_params["substrate_length"] = total_l + 2 * margin
         self.log_message(f"Substrate size calculated: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
@@ -616,140 +616,136 @@ class ModernPatchAntennaDesigner:
         self.hfss["probeK"] = "0.3"          # fração do patchL
         self.hfss["padAir"] = f"{max(spacing, W, L)/2 + Lp + 2.0}mm"
 
-        return a, b, wall, Lp, clear
+        # Adicionar variáveis para cálculo de região de ar
+        self.hfss["max_patch_dim"] = f"{max(L, W)}mm"
+        self.hfss["region_offset_x"] = f"subW/2 + max_patch_dim"
+        self.hfss["region_offset_y"] = f"subL/2 + max_patch_dim"
+        self.hfss["region_offset_z"] = "max_patch_dim"
+
+        return a, b, wall, Lp, clear, h_sub  # Retornar valores numéricos
 
     def _create_coax_feed_lumped(self, ground, substrate, x_feed: float, y_feed: float,
-                                 name_prefix: str):
+                                 name_prefix: str, a_val: float, b_val: float, wall_val: float, 
+                                 Lp_val: float, clear_val: float, h_sub_val: float):
         """
         Constrói: Pino (a), PTFE anular (a..b) em -Lp..0, blindagem (b..b+wall) em -Lp..0,
         furo no substrato (raio b+clear) 0..h_sub, anti-pad no GND,
         e cria Lumped Port (anel) em z=-Lp.
         """
-        # Obter valores numéricos
-        a_val = float(self.params["probe_radius"])
-        Lp_val = float(self.params["coax_port_length"])
-        h_sub_val = float(self.params["substrate_thickness"])
-        b_val = a_val * math.exp(50.0 * math.sqrt(float(self.params["coax_er"])) / 60.0)
-        wall_val = float(self.params["coax_wall_thickness"])
-        clear_val = float(self.params["antipad_clearance"])
+        # Usar valores numéricos passados como parâmetros
+        a = a_val
+        b = b_val
+        wall = wall_val
+        Lp = Lp_val
+        clear = clear_val
+        h_sub = h_sub_val
 
         # PINO: -Lp -> h_sub + eps
         pin = self.hfss.modeler.create_cylinder(
             orientation="Z", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=a_val,
-            height=h_sub_val + Lp_val + 0.001,  # + eps
+            origin=[x_feed, y_feed, -Lp], 
+            radius=a,
+            height=h_sub + Lp + 0.001,
             name=f"{name_prefix}_Pin", 
             material="copper"
         )
 
-        # PTFE sólido (raio b) em -Lp..0
+        # PTFE sólido (raio b) em -Lp..0 - manter original ao subtrair
         ptfe_solid = self.hfss.modeler.create_cylinder(
             orientation="Z", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=b_val, 
-            height=Lp_val,
+            origin=[x_feed, y_feed, -Lp], 
+            radius=b, 
+            height=Lp,
             name=f"{name_prefix}_PTFEsolid", 
             material="PTFE_Custom"
         )
-        # Subtrair pino -> anel PTFE
-        self.hfss.modeler.subtract(ptfe_solid, [pin], keep_originals=False)
-        ptfe = ptfe_solid
+        # Subtrair pino -> anel PTFE, mantendo ambos
+        self.hfss.modeler.subtract(ptfe_solid, [pin], keep_originals=True)
+        ptfe = self.hfss.modeler.get_object_by_name(f"{name_prefix}_PTFEsolid")
         ptfe.name = f"{name_prefix}_PTFE"
 
         # BLINDAGEM: tubo (b .. b+wall) em -Lp..0
         shield_outer = self.hfss.modeler.create_cylinder(
             orientation="Z", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=b_val + wall_val, 
-            height=Lp_val,
+            origin=[x_feed, y_feed, -Lp], 
+            radius=b + wall, 
+            height=Lp,
             name=f"{name_prefix}_ShieldOuter", 
             material="copper"
         )
         shield_inner_void = self.hfss.modeler.create_cylinder(
             orientation="Z", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=b_val, 
-            height=Lp_val,
-            name=f"{name_prefix}_ShieldInnerVoid", 
-            material="vacuum"
+            origin=[x_feed, y_feed, -Lp], 
+            radius=b, 
+            height=Lp,
+            name=f"{name_prefix}_ShieldInnerVoid"
         )
-        self.hfss.modeler.subtract(shield_outer, [shield_inner_void], keep_originals=False)
-        shield = shield_outer
+        self.hfss.modeler.subtract(shield_outer, [shield_inner_void], keep_originals=True)
+        
+        # Renomear o shield corretamente
+        shield = self.hfss.modeler.get_object_by_name(f"{name_prefix}_ShieldOuter")
         shield.name = f"{name_prefix}_Shield"
 
         # FURO NO SUBSTRATO (0..h_sub)
-        hole_r = b_val + clear_val
+        hole_r = b + clear
         sub_hole = self.hfss.modeler.create_cylinder(
             orientation="Z", 
             origin=[x_feed, y_feed, 0.0], 
             radius=hole_r, 
-            height=h_sub_val,
-            name=f"{name_prefix}_SubHole", 
-            material="vacuum"
+            height=h_sub,
+            name=f"{name_prefix}_SubHole"
         )
-        self.hfss.modeler.subtract(substrate, [sub_hole], keep_originals=False)
+        self.hfss.modeler.subtract(substrate, [sub_hole], keep_originals=True)
 
         # ANTI-PAD NO GND (folha circular)
         g_hole = self.hfss.modeler.create_circle(
             orientation="XY", 
             origin=[x_feed, y_feed, 0.0],
             radius=hole_r, 
-            name=f"{name_prefix}_GndHole", 
-            material="vacuum"
+            name=f"{name_prefix}_GndHole"
         )
-        self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
+        self.hfss.modeler.subtract(ground, [g_hole], keep_originals=True)
 
         # PORTA LUMPED: anel entre raio a e b em z=-Lp
         port_ring = self.hfss.modeler.create_circle(
             orientation="XY", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=b_val,
-            name=f"{name_prefix}_PortRing", 
-            material="vacuum"
+            origin=[x_feed, y_feed, -Lp], 
+            radius=b,
+            name=f"{name_prefix}_PortRing"
         )
         port_hole = self.hfss.modeler.create_circle(
             orientation="XY", 
-            origin=[x_feed, y_feed, -Lp_val], 
-            radius=a_val,
-            name=f"{name_prefix}_PortHole", 
-            material="vacuum"
+            origin=[x_feed, y_feed, -Lp], 
+            radius=a,
+            name=f"{name_prefix}_PortHole"
         )
-        self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
+        self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=True)
 
-        # Lumped Port (referência = blindagem)
-        # Verificar se os objetos foram criados corretamente antes de criar o porto
-        if shield and port_ring:
+        # Lumped Port - Usar a nova API do PyAEDT
+        try:
+            port = self.hfss.create_lumped_port_to_sheet(
+                sheet=port_ring.name,
+                axisdir=2,  # Direção Z
+                impedance=50.0,
+                portname=f"{name_prefix}_Lumped",
+                renormalize=True
+            )
+            self.log_message(f"Lumped Port '{name_prefix}_Lumped' created successfully.")
+        except Exception as e:
+            self.log_message(f"Error creating lumped port: {str(e)}")
+            # Tentar método alternativo se o primeiro falhar
             try:
-                self.hfss.lumped_port(
+                port = self.hfss.lumped_port(
                     assignment=port_ring.name,
-                    reference=[shield.name],  # Passar como lista
+                    reference=shield.name,
                     impedance=50.0,
                     name=f"{name_prefix}_Lumped",
                     renormalize=True
                 )
-                self.log_message(f"Lumped Port '{name_prefix}_Lumped' created.")
-            except Exception as e:
-                self.log_message(f"Error creating lumped port: {str(e)}")
-                # Tentar alternativa: usar a face do shield
-                try:
-                    # Obter a face do shield
-                    shield_faces = shield.faces
-                    if shield_faces:
-                        # Usar a face superior do shield como referência
-                        ref_face = shield_faces[0].id
-                        self.hfss.lumped_port(
-                            assignment=port_ring.name,
-                            reference=[ref_face],  # Passar ID da face como referência
-                            impedance=50.0,
-                            name=f"{name_prefix}_Lumped",
-                            renormalize=True
-                        )
-                        self.log_message(f"Lumped Port '{name_prefix}_Lumped' created using face reference.")
-                except Exception as e2:
-                    self.log_message(f"Error creating lumped port with face reference: {str(e2)}")
-        else:
-            self.log_message(f"Error: Shield or port ring not created for {name_prefix}")
+                self.log_message(f"Lumped Port '{name_prefix}_Lumped' created with alternative method.")
+            except Exception as e2:
+                self.log_message(f"Error creating lumped port with alternative method: {str(e2)}")
+                return pin, ptfe, None
 
         return pin, ptfe, shield
 
@@ -827,7 +823,7 @@ class ModernPatchAntennaDesigner:
             sub_l = float(self.calculated_params["substrate_length"])
 
             # Variáveis de design
-            a, b, wall, Lp, clear = self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
+            a, b, wall, Lp, clear, h_sub_val = self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
 
             # Substrato e Ground
             self.log_message("Creating substrate")
@@ -879,7 +875,6 @@ class ModernPatchAntennaDesigner:
                     patches.append(patch)
 
                     # Pad de solda no patch (opcional)
-                    # probeOfsY = probeK * patchL
                     self.hfss["probeOfsY"] = "probeK*patchL"
                     pad = self.hfss.modeler.create_circle(
                         orientation="XY", 
@@ -901,7 +896,13 @@ class ModernPatchAntennaDesigner:
                         substrate=substrate,
                         x_feed=x_feed, 
                         y_feed=y_feed,
-                        name_prefix=f"P{count}"
+                        name_prefix=f"P{count}",
+                        a_val=a,
+                        b_val=b,
+                        wall_val=wall,
+                        Lp_val=Lp,
+                        clear_val=clear,
+                        h_sub_val=h_sub_val
                     )
 
                     if shield is None:
@@ -915,13 +916,13 @@ class ModernPatchAntennaDesigner:
 
             # Região de ar + radiação (paramétrica)
             self.log_message("Creating air region + radiation boundary")
-            # Calcular o comprimento de onda no ar para a frequência mais baixa
-            lambda0 = self.c / (self.params["sweep_start"] * 1e9) * 1000  # mm
-            region_size = lambda0 / 4  # λ/4 em todas as direções
-            
-            # Criar região de ar com dimensões corretas
+            # Usar dimensões baseadas no substrate com margem adequada
+            region_size_x = f"subW/2 + {max(self.calculated_params['patch_length'], self.calculated_params['patch_width'])}"
+            region_size_y = f"subL/2 + {max(self.calculated_params['patch_length'], self.calculated_params['patch_width'])}"
+            region_size_z = f"{max(self.calculated_params['patch_length'], self.calculated_params['patch_width'])}"
+
             region = self.hfss.modeler.create_region(
-                [region_size, region_size, region_size, region_size, region_size, region_size],
+                [region_size_x, region_size_y, region_size_z, region_size_x, region_size_y, region_size_z],
                 is_percentage=False
             )
             self.hfss.assign_radiation_boundary_to_objects(region)

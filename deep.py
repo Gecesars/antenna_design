@@ -638,7 +638,7 @@ class ModernPatchAntennaDesigner:
             orientation="Z", 
             origin=[x_feed, y_feed, -Lp_val], 
             radius=a_val,
-            height=h_sub_val + Lp_val + 0.001,  # + eps
+            height=h_sub_val + Lp_val + 0.001,
             name=f"{name_prefix}_Pin", 
             material="copper"
         )
@@ -675,6 +675,12 @@ class ModernPatchAntennaDesigner:
             material="vacuum"
         )
         self.hfss.modeler.subtract(shield_outer, [shield_inner_void], keep_originals=False)
+        
+        # Verificar se o shield foi criado corretamente
+        if not shield_outer or not hasattr(shield_outer, 'name'):
+            self.log_message(f"Error: Shield for {name_prefix} was not created correctly")
+            return pin, ptfe, None
+            
         shield = shield_outer
         shield.name = f"{name_prefix}_Shield"
 
@@ -717,12 +723,11 @@ class ModernPatchAntennaDesigner:
         )
         self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
 
-        # Lumped Port (referência = blindagem)
-        # Verificar se os objetos foram criados corretamente antes de criar o porto
+        # Lumped Port - Abordagem simplificada
         try:
             # Usar a API mais recente do PyAEDT para criar portos
             port = self.hfss.create_lumped_port_to_sheet(
-                sheet_name=port_ring.name,
+                sheet=port_ring.name,
                 axisdir=0,  # 0=X, 1=Y, 2=Z
                 impedance=50.0,
                 portname=f"{name_prefix}_Lumped",
