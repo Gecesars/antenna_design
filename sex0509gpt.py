@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import tempfile
+import time
 from datetime import datetime
 import math
 import json
@@ -24,7 +25,7 @@ ctk.set_default_color_theme("blue")
 
 class ModernPatchAntennaDesigner:
     def __init__(self):
-        self.hfss: Hfss | None = None
+        self.hfss = None
         self.desktop: Desktop | None = None
         self.temp_folder = None
         self.project_path = ""
@@ -45,20 +46,24 @@ class ModernPatchAntennaDesigner:
             "aedt_version": "2024.2",
             "non_graphical": False,
             "spacing_type": "lambda/2",
-            "substrate_material": "Duroid (tm)",   # nome existente
+            "substrate_material": "Duroid (tm)",   # nome que certamente existe
             "substrate_thickness": 0.5,    # mm
             "metal_thickness": 0.035,      # mm
             "er": 2.2,
             "tan_d": 0.0009,
             "feed_position": "inset",      # edge|inset
-            "feed_rel_x": 0.485,           # fração*W a partir da borda esquerda
+            "feed_rel_x": 0.485,           # fração*W a partir da borda esquerda (padrão 0.485)
             "probe_radius": 0.40,          # mm (a)
             # coax do feed: ar (εr=1) e b/a=2.3 ⇒ ~50 Ω
             "coax_er": 1.0,
             "coax_ba_ratio": 2.3,
             "coax_wall_thickness": 0.20,   # mm (blindagem)
             "coax_port_length": 3.0,       # mm  (Lp, para baixo do GND)
-            "antipad_clearance": 0.10      # mm
+            "antipad_clearance": 0.10,     # mm (folga do furo/antipad)
+
+            # sweep controls
+            "sweep_type": "Interpolating",  # "Discrete" | "Interpolating" | "Fast"
+            "sweep_step": 0.02              # GHz (usado no Discrete)
         }
 
         # -------- Parâmetros calculados --------
@@ -75,29 +80,34 @@ class ModernPatchAntennaDesigner:
             "substrate_length": 0.0
         }
 
-        self.c = 299_792_458.0
+        self.c = 299792458.0
         self.setup_gui()
 
     # ---------------- GUI ----------------
     def setup_gui(self):
         self.window = ctk.CTk()
         self.window.title("Patch Antenna Array Designer")
-        # Maximizado com barra de tarefas visível
+
+        # Maximiza mantendo a barra de tarefas visível
         try:
-            self.window.state("zoomed")
+            self.window.state('zoomed')           # Windows
         except Exception:
-            self.window.geometry("1400x950")
+            try:
+                self.window.attributes('-zoomed', True)  # Linux
+            except Exception:
+                self.window.geometry("1400x900")   # fallback
+
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.window.grid_columnconfigure(0, weight=1)
         self.window.grid_rowconfigure(1, weight=1)
 
-        header = ctk.CTkFrame(self.window, height=56, fg_color=("gray85", "gray20"))
+        header = ctk.CTkFrame(self.window, height=64, fg_color=("gray85", "gray20"))
         header.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         header.grid_propagate(False)
         ctk.CTkLabel(header, text="Patch Antenna Array Designer",
-                     font=ctk.CTkFont(size=22, weight="bold"),
-                     text_color=("gray10", "gray90")).pack(pady=10)
+                     font=ctk.CTkFont(size=24, weight="bold"),
+                     text_color=("gray10", "gray90")).pack(pady=14)
 
         self.tabview = ctk.CTkTabview(self.window)
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -195,6 +205,10 @@ class ModernPatchAntennaDesigner:
         r = add(sec_sim, "CPU Cores:", "cores", self.params["cores"], r)
         r = add(sec_sim, "Show HFSS Interface:", "show_gui", not self.params["non_graphical"], r, check=True)
         r = add(sec_sim, "Save Project:", "save_project", self.save_project, r, check=True)
+        # novos controles de sweep
+        r = add(sec_sim, "Sweep Type:", "sweep_type", self.params["sweep_type"], r,
+                combo=["Discrete", "Interpolating", "Fast"])
+        r = add(sec_sim, "Discrete Step (GHz):", "sweep_step", self.params["sweep_step"], r)
 
         self.entries = entries
 
@@ -284,11 +298,17 @@ class ModernPatchAntennaDesigner:
         graph.grid_columnconfigure(0, weight=1)
         graph.grid_rowconfigure(0, weight=1)
 
-        # 3 subplots: S11, theta-cut, phi-cut
-        self.fig, (self.ax_s, self.ax_th, self.ax_ph) = plt.subplots(3, 1, figsize=(8, 10))
-        for ax in (self.ax_s, self.ax_th, self.ax_ph):
-            self.fig.set_facecolor('#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF')
-            ax.set_facecolor('#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF')
+        # 3 eixos: S11, corte theta, corte phi
+        self.fig = plt.figure(figsize=(10, 9))
+        face = '#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF'
+        self.fig.patch.set_facecolor(face)
+
+        self.ax_s11 = self.fig.add_subplot(3, 1, 1)
+        self.ax_th = self.fig.add_subplot(3, 1, 2)
+        self.ax_ph = self.fig.add_subplot(3, 1, 3)
+
+        for ax in [self.ax_s11, self.ax_th, self.ax_ph]:
+            ax.set_facecolor(face)
             if ctk.get_appearance_mode() == "Dark":
                 ax.tick_params(colors='white')
                 ax.xaxis.label.set_color('white')
@@ -296,7 +316,7 @@ class ModernPatchAntennaDesigner:
                 ax.title.set_color('white')
                 for s in ['bottom', 'top', 'right', 'left']:
                     ax.spines[s].set_color('white')
-                ax.grid(color='gray', alpha=0.4)
+                ax.grid(color='gray', alpha=0.5)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -389,10 +409,11 @@ class ModernPatchAntennaDesigner:
                     self.save_project = widget.get()
                 elif key in ["substrate_thickness", "metal_thickness", "er", "tan_d",
                              "probe_radius", "coax_ba_ratio", "coax_wall_thickness",
-                             "coax_port_length", "antipad_clearance", "feed_rel_x"]:
+                             "coax_port_length", "antipad_clearance", "feed_rel_x",
+                             "sweep_step"]:
                     if isinstance(widget, ctk.CTkEntry):
                         self.params[key] = float(widget.get())
-                elif key in ["spacing_type", "substrate_material", "feed_position"]:
+                elif key in ["spacing_type", "substrate_material", "feed_position", "sweep_type"]:
                     self.params[key] = widget.get()
                 else:
                     if isinstance(widget, ctk.CTkEntry):
@@ -511,11 +532,13 @@ class ModernPatchAntennaDesigner:
 
     def _open_or_create_project(self):
         """Abre projeto se já existir; senão cria um novo em pasta temporária com timestamp."""
+        # inicia Desktop caso não iniciado
         if self.desktop is None:
             self.desktop = Desktop(version=self.params["aedt_version"],
                                    non_graphical=self.params["non_graphical"],
                                    new_desktop=True)
 
+        # tenta descobrir projetos abertos via oDesktop/_odesktop
         od = getattr(self.desktop, "_odesktop", None) or getattr(self.desktop, "odesktop", None)
         open_names, open_objs = [], []
         if od:
@@ -529,9 +552,11 @@ class ModernPatchAntennaDesigner:
             except Exception:
                 pass
 
+        # se o projeto com esse display name já existe, cria novo DESIGN dentro dele
         if self.project_display_name in open_names:
             idx = open_names.index(self.project_display_name)
             proj_obj = open_objs[idx]
+            # gera nome de design único
             new_design = self.design_base_name
             try:
                 tmp = Hfss(project=proj_obj, non_graphical=self.params["non_graphical"],
@@ -542,12 +567,12 @@ class ModernPatchAntennaDesigner:
                     k += 1
                     new_design = f"{self.design_base_name}_{k}"
                 try:
-                    tmp.close_desktop()
+                    tmp.close_desktop()  # tolerar se não existir
                 except Exception:
                     pass
             except Exception:
                 new_design = f"{self.design_base_name}_{datetime.now().strftime('%H%M%S')}"
-
+            # cria app apontando para o projeto existente
             self.hfss = Hfss(project=proj_obj, design=new_design, solution_type="DrivenModal",
                              version=self.params["aedt_version"], non_graphical=self.params["non_graphical"])
             try:
@@ -557,6 +582,7 @@ class ModernPatchAntennaDesigner:
             self.log_message(f"Using existing project '{self.project_display_name}', created design '{new_design}'")
             return
 
+        # caso contrário, cria um novo projeto TEMP com timestamp
         if self.temp_folder is None:
             self.temp_folder = tempfile.TemporaryDirectory(suffix=".ansys")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -568,7 +594,7 @@ class ModernPatchAntennaDesigner:
     def _set_design_variables(self, L, W, spacing, rows, cols, h_sub, sub_w, sub_l):
         a = float(self.params["probe_radius"])
         ba = float(self.params["coax_ba_ratio"])
-        b = a * ba
+        b = a * ba  # b/a = 2.3
         wall = float(self.params["coax_wall_thickness"])
         Lp = float(self.params["coax_port_length"])
         clear = float(self.params["antipad_clearance"])
@@ -593,7 +619,8 @@ class ModernPatchAntennaDesigner:
         self.log_message(f"Air coax set: a={a:.3f} mm, b={b:.3f} mm (b/a={ba:.3f}≈2.3 → ~50 Ω)")
         return a, b, wall, Lp, clear
 
-    def _create_coax_feed_lumped(self, ground, substrate, x_feed: float, y_feed: float, name_prefix: str):
+    def _create_coax_feed_lumped(self, ground, substrate, x_feed: float, y_feed: float,
+                                 name_prefix: str):
         """Feed coaxial em AR com porta lumped anelar (linha radial totalmente dentro)."""
         try:
             a_val = float(self.params["probe_radius"])
@@ -605,11 +632,13 @@ class ModernPatchAntennaDesigner:
             if b_val - a_val < 0.02:
                 b_val = a_val + 0.02
 
+            # PINO condutor
             pin = self.hfss.modeler.create_cylinder(
                 orientation="Z", origin=[x_feed, y_feed, -Lp_val],
                 radius=a_val, height=h_sub_val + Lp_val + 0.001,
                 name=f"{name_prefix}_Pin", material="copper")
 
+            # Blindagem (tubo)
             shield_outer = self.hfss.modeler.create_cylinder(
                 orientation="Z", origin=[x_feed, y_feed, -Lp_val],
                 radius=b_val + wall_val, height=Lp_val,
@@ -621,6 +650,7 @@ class ModernPatchAntennaDesigner:
             self.hfss.modeler.subtract(shield_outer, [shield_inner_void], keep_originals=False)
             shield = shield_outer
 
+            # furo no substrato + anti-pad no GND
             hole_r = b_val + clear_val
             sub_hole = self.hfss.modeler.create_cylinder(
                 orientation="Z", origin=[x_feed, y_feed, 0.0],
@@ -631,6 +661,7 @@ class ModernPatchAntennaDesigner:
                 name=f"{name_prefix}_GndHole", material="vacuum")
             self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
 
+            # folha do porto (anel a..b) em z = -Lp
             port_ring = self.hfss.modeler.create_circle(
                 orientation="XY", origin=[x_feed, y_feed, -Lp_val],
                 radius=b_val, name=f"{name_prefix}_PortRing", material="vacuum")
@@ -639,6 +670,7 @@ class ModernPatchAntennaDesigner:
                 radius=a_val, name=f"{name_prefix}_PortHole", material="vacuum")
             self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
 
+            # linha de integração radial inteiramente dentro do anel
             eps_line = min(0.1 * (b_val - a_val), 0.05)
             r_start = a_val + eps_line
             r_end = b_val - eps_line
@@ -661,83 +693,162 @@ class ModernPatchAntennaDesigner:
             self.log_message(f"Traceback: {traceback.format_exc()}")
             return None, None, None
 
-    # ---------- Infinite Sphere (100% COM/compatível) ----------
-    def _create_infinite_sphere(self, name="FF_Sphere"):
-        try:
-            oRad = self.hfss.odesign.GetModule("RadField")
-            oRad.InsertFarFieldSphereSetup(
-                name,
-                [
-                    "UseCustomRadiationSurface:=", False,
-                    "CoordinateSystem:=", "Global",
-                    "ThetaStart:=", "0deg", "ThetaStop:=", "180deg", "ThetaStep:=", "1deg",
-                    "PhiStart:=", "-180deg", "PhiStop:=", "180deg", "PhiStep:=", "1deg"
-                ]
-            )
-            self.log_message(f"Infinite Sphere '{name}' criada via COM (θ 0..180, φ -180..180, 1°).")
-            return name
-        except Exception as e:
-            self.log_message(f"COM da Infinite Sphere falhou: {e}")
-            return None
-
-    # ---------- Variáveis de potência/fase por porta ----------
     def _init_port_power_phase_vars(self, excitations: List[str]):
         """Cria Pow_Pi=1W e Phi_Pi=0deg para cada porta i (i começa em 1)."""
         try:
+            vm = getattr(self.hfss, "variable_manager", None)
+            if not vm:
+                self.log_message("Variable manager unavailable; skipping Pow/Phi vars.")
+                return
             n = len(excitations)
             for i in range(1, n + 1):
-                pw = f"Pow_P{i}"
-                ph = f"Phi_P{i}"
-                try:
-                    self.hfss[pw]  # acesso para ver se existe
-                except Exception:
-                    self.hfss[pw] = "1W"
-                try:
-                    self.hfss[ph]
-                except Exception:
-                    self.hfss[ph] = "0deg"
-            self.log_message(f"Initialized post-processing vars for {n} ports (Pow_Pi=1W, Phi_Pi=0deg).")
+                vm.set_variable(f"Pow_P{i}", "1W",  overwrite=True, is_project_var=False)
+                vm.set_variable(f"Phi_P{i}", "0deg", overwrite=True, is_project_var=False)
+            self.log_message(f"Post-processing vars created for {n} ports (Pow_Pi=1W, Phi_Pi=0deg).")
         except Exception as e:
             self.log_message(f"Post-vars init warning: {e}")
 
-    # ---------- Far-field cuts (compatível) ----------
-    def _get_gain_cut(self, sphere_name: str, freq_ghz: float, cut: str, fixed_angle_deg: float):
-        """
-        Obtém corte de GainTotal via get_solution_data (categoria Far Fields).
-        cut: 'theta' (varrendo θ com φ fixo) ou 'phi' (varrendo φ com θ fixo).
-        """
-        fstr = f"{freq_ghz}GHz"
-        primary = "Theta" if cut.lower() == "theta" else "Phi"
-        families = {"Freq": [fstr]}
-        if primary == "Theta":
-            families["Phi"] = [f"{fixed_angle_deg}deg"]
-        else:
-            families["Theta"] = [f"{fixed_angle_deg}deg"]
+    def _create_infinite_sphere(self, name="FF_Sphere"):
+        """Cria Infinite Sphere 0..180 (theta), -180..180 (phi), passo 1°. Tenta múltiplas assinaturas."""
+        try:
+            # Se já existir, retornar nome
+            try:
+                ffs = self.hfss.get_radiation_setups()
+                if name in ffs:
+                    return name
+            except Exception:
+                pass
 
-        ctx_candidates = [c for c in [sphere_name, "FF_Sphere", "Infinite Sphere1", "3D"] if c]
+            # Tenta assinatura nova (kwargs com ranges)
+            try:
+                self.hfss.insert_infinite_sphere(
+                    name=name,
+                    theta_start=0, theta_stop=180, theta_step=1,
+                    phi_start=-180, phi_stop=180, phi_step=1
+                )
+                return name
+            except TypeError:
+                pass
 
-        for ctx in ctx_candidates:
-            for setup in ("Setup1 : LastAdaptive", "Setup1 : Sweep1", "Setup1 : AdaptivePass"):
+            # Tenta assinatura com dicionário de props
+            try:
+                self.hfss.insert_infinite_sphere(
+                    name,  # name posicional
+                    {"CSName": "Global",
+                     "StartTheta": "0deg", "StopTheta": "180deg", "StepTheta": "1deg",
+                     "StartPhi": "-180deg", "StopPhi": "180deg", "StepPhi": "1deg"}
+                )
+                return name
+            except Exception:
+                pass
+
+            # Tenta assinatura mínima (deixa padrão e edita depois)
+            try:
+                self.hfss.insert_infinite_sphere(name)
+                # Tenta editar propriedades (se disponível)
                 try:
-                    sol = self.hfss.post.get_solution_data(
-                        expressions="GainTotal",
-                        primary_sweep_variable=primary,
-                        families_dict=families,
-                        report_category="Far Fields",
-                        context=ctx,
-                        setup_sweep_name=setup
+                    self.hfss.edit_infinite_sphere(
+                        name,
+                        theta_start=0, theta_stop=180, theta_step=1,
+                        phi_start=-180, phi_stop=180, phi_step=1
                     )
-                    if not sol:
-                        continue
-                    x = np.asarray(sol.primary_sweep_values, dtype=float)
-                    data = sol.data_real()
-                    y = np.asarray(data[0] if isinstance(data, (list, tuple)) else data, dtype=float)
-                    if x.size and y.size and x.size == y.size:
-                        return x, y
-                except Exception as e:
-                    self.log_message(f"Far-field ({cut}) via '{ctx}' / '{setup}' falhou: {e}")
-                    continue
-        return None, None
+                except Exception:
+                    pass
+                return name
+            except Exception as e:
+                self.log_message(f"Infinite Sphere creation failed: {e}")
+                return None
+        except Exception as e:
+            self.log_message(f"Infinite Sphere error: {e}")
+            return None
+
+    def _get_gain_cut(self, f0_ghz: float, cut: str = "theta", fixed_angle_deg: float = 0.0):
+        """
+        Tenta obter um corte de ganho:
+        - Primeiro via post.get_far_field_data(freq=...)
+        - Se falhar, retorna (None, None)
+        cut: "theta" -> fixa phi = fixed_angle_deg; "phi" -> fixa theta = fixed_angle_deg
+        """
+        try:
+            fstr = f"{f0_ghz}GHz"
+            # algumas versões aceitam apenas "freq" e usam a última esfera
+            try:
+                ff = self.hfss.post.get_far_field_data(freq=fstr)
+            except TypeError:
+                # assinatura mais antiga pode ser sem nome de argumento
+                ff = self.hfss.post.get_far_field_data(fstr)
+            if not ff:
+                return None, None
+
+            # Extrair campos possíveis (tenta várias chaves)
+            def first_key(d, options):
+                for k in options:
+                    if k in d:
+                        return k
+                # try case-insensitive
+                low = {k.lower(): k for k in d.keys()}
+                for k in options:
+                    if k.lower() in low:
+                        return low[k.lower()]
+                return None
+
+            # ff pode ser dict/obj; tentar acessar como dict
+            if hasattr(ff, "keys"):
+                ff_dict = ff
+            elif isinstance(ff, (list, tuple)) and len(ff) > 0 and hasattr(ff[0], "keys"):
+                ff_dict = ff[0]
+            else:
+                return None, None
+
+            k_theta = first_key(ff_dict, ["theta", "Theta"])
+            k_phi = first_key(ff_dict, ["phi", "Phi"])
+            # procurar ganho
+            k_gain = first_key(ff_dict, ["GainTotal", "Gain", "gain", "Abs(GainTotal)", "RealizedGainTotal", "RealizedGain"])
+            if not (k_theta and k_phi and k_gain):
+                return None, None
+
+            TH = np.asarray(ff_dict[k_theta], dtype=float)
+            PH = np.asarray(ff_dict[k_phi], dtype=float)
+            GA = np.asarray(ff_dict[k_gain], dtype=float)
+
+            # GA pode ser grade 2D; precisamos achar o corte
+            # Tentativa: se GA for 2D com shape (#theta, #phi) ou vice-versa
+            if GA.ndim == 2:
+                # descobrir como a grade está organizada
+                # Vamos assumir TH varre primeira dimensão (linhas) e PH colunas
+                # Encontrar índice mais próximo do ângulo fixo
+                if cut == "theta":
+                    idx = int(np.argmin(np.abs(PH - fixed_angle_deg)))
+                    g_line = GA[:, idx]
+                    th_line = TH if TH.ndim == 1 else np.linspace(0, 180, GA.shape[0])
+                    return th_line, g_line
+                else:
+                    # cut == "phi"
+                    # escolher theta mais próximo do fixo
+                    idx = int(np.argmin(np.abs(TH - fixed_angle_deg)))
+                    g_line = GA[idx, :]
+                    ph_line = PH if PH.ndim == 1 else np.linspace(-180, 180, GA.shape[1])
+                    return ph_line, g_line
+            else:
+                # GA 1D: precisa filtrar pares (TH, PH) próximos ao ângulo fixo
+                if cut == "theta":
+                    mask = np.isclose(PH, fixed_angle_deg, atol=0.51)  # ~±0.5°
+                    if not np.any(mask):
+                        # se não existir exatamente, pegue o mais próximo
+                        idx = int(np.argmin(np.abs(PH - fixed_angle_deg)))
+                        mask = (PH == PH[idx])
+                    return TH[mask], GA[mask]
+                else:
+                    mask = np.isclose(TH, fixed_angle_deg, atol=0.51)
+                    if not np.any(mask):
+                        idx = int(np.argmin(np.abs(TH - fixed_angle_deg)))
+                        mask = (TH == TH[idx])
+                    return PH[mask], GA[mask]
+
+        except Exception as e:
+            self.log_message(f"Far-field cut error ({cut}): {e}")
+            self.log_message(f"Traceback: {traceback.format_exc()}")
+            return None, None
 
     # ------------- Simulação -------------
     def start_simulation_thread(self):
@@ -768,7 +879,7 @@ class ModernPatchAntennaDesigner:
 
             # abrir/criar projeto + design
             self._open_or_create_project()
-            self.progress_bar.set(0.20)
+            self.progress_bar.set(0.25)
 
             self.hfss.modeler.model_units = "mm"
             self.log_message("Model units set to: mm")
@@ -815,7 +926,7 @@ class ModernPatchAntennaDesigner:
             total_l = rows * L + (rows - 1) * spacing
             start_x = -total_w / 2 + W / 2
             start_y = -total_l / 2 + L / 2
-            self.progress_bar.set(0.30)
+            self.progress_bar.set(0.35)
 
             count = 0
             for r in range(rows):
@@ -840,12 +951,12 @@ class ModernPatchAntennaDesigner:
                     )
                     patches.append(patch)
 
-                    # posição do pad/coax
+                    # posição do pad/coax (dentro do patch)
                     if self.params["feed_position"] == "edge":
                         y_feed = cy - 0.5 * L + 0.02 * L
                     else:  # inset
                         y_feed = cy - 0.5 * L + 0.30 * L
-                    # x relativo (clamped 0..1)
+                    # x relativo
                     relx = float(self.params["feed_rel_x"])
                     relx = min(max(relx, 0.0), 1.0)
                     x_feed = cx - 0.5 * W + relx * W
@@ -870,7 +981,7 @@ class ModernPatchAntennaDesigner:
                         y_feed=y_feed,
                         name_prefix=f"P{count}"
                     )
-                    self.progress_bar.set(0.30 + 0.25 * (count / float(rows * cols)))
+                    self.progress_bar.set(0.35 + 0.25 * (count / float(rows * cols)))
 
             if self.stop_simulation:
                 self.log_message("Simulation stopped by user")
@@ -892,28 +1003,53 @@ class ModernPatchAntennaDesigner:
                 [pad_mm, pad_mm, pad_mm, pad_mm, pad_mm, pad_mm], is_percentage=False
             )
             self.hfss.assign_radiation_boundary_to_objects(region)
-            self.progress_bar.set(0.60)
+            self.progress_bar.set(0.65)
 
-            # Setup + Sweep
+            # Setup
             self.log_message("Creating simulation setup")
             setup = self.hfss.create_setup(name="Setup1", setup_type="HFSSDriven")
             setup.props["Frequency"] = f"{self.params['frequency']}GHz"
             setup.props["MaxDeltaS"] = 0.02
 
-            self.log_message("Creating frequency sweep (linear count)")
+            # ----- Sweep conforme escolha do usuário -----
+            self.log_message(f"Creating frequency sweep: {self.params['sweep_type']}")
+            stype = self.params["sweep_type"]
             try:
-                step = (self.params["sweep_stop"] - self.params["sweep_start"]) / 200.0
-                setup.create_linear_step_sweep(
-                    unit="GHz", start_frequency=self.params["sweep_start"],
-                    stop_frequency=self.params["sweep_stop"], step_size=step, name="Sweep1"
-                )
-            except Exception:
-                setup.create_frequency_sweep(
-                    unit="GHz", name="Sweep1",
-                    start_frequency=self.params["sweep_start"],
-                    stop_frequency=self.params["sweep_stop"],
-                    sweep_type="Interpolating"
-                )
+                # tente remover Sweep1 se já existir
+                try:
+                    sw = setup.get_sweep("Sweep1")
+                    if sw:
+                        sw.delete()
+                except Exception:
+                    pass
+
+                if stype == "Discrete":
+                    step = float(self.params["sweep_step"])
+                    setup.create_linear_step_sweep(
+                        unit="GHz",
+                        start_frequency=self.params["sweep_start"],
+                        stop_frequency=self.params["sweep_stop"],
+                        step_size=step,
+                        name="Sweep1"
+                    )
+                elif stype == "Fast":
+                    setup.create_frequency_sweep(
+                        unit="GHz",
+                        name="Sweep1",
+                        start_frequency=self.params["sweep_start"],
+                        stop_frequency=self.params["sweep_stop"],
+                        sweep_type="Fast"
+                    )
+                else:  # Interpolating
+                    setup.create_frequency_sweep(
+                        unit="GHz",
+                        name="Sweep1",
+                        start_frequency=self.params["sweep_start"],
+                        stop_frequency=self.params["sweep_stop"],
+                        sweep_type="Interpolating"
+                    )
+            except Exception as e:
+                self.log_message(f"Sweep creation warning: {e}")
 
             # malha leve
             self.log_message("Assigning local mesh refinement")
@@ -936,11 +1072,13 @@ class ModernPatchAntennaDesigner:
                 self.log_message("No excitations found. Aborting before solve.")
                 return
 
-            # Variáveis de potência/fase (1W / 0deg)
+            # variáveis de potência/fase por porta
             self._init_port_power_phase_vars(exs)
 
-            # Infinite Sphere (COM)
+            # Infinite Sphere
             sphere_name = self._create_infinite_sphere(name="FF_Sphere")
+            if not sphere_name:
+                self.log_message("Could not create Infinite Sphere (far-field reports may be unavailable).")
 
             self.log_message("Validating design")
             try:
@@ -959,7 +1097,7 @@ class ModernPatchAntennaDesigner:
 
             self.progress_bar.set(0.9)
             self.log_message("Processing results")
-            self.plot_results(sphere_name=sphere_name)
+            self.plot_results()
             self.progress_bar.set(1.0)
             self.sim_status_label.configure(text="Simulation completed")
             self.log_message("Simulation completed successfully")
@@ -972,12 +1110,13 @@ class ModernPatchAntennaDesigner:
             self.stop_button.configure(state="disabled")
             self.is_simulation_running = False
 
-    def plot_results(self, sphere_name=None):
+    def plot_results(self):
         try:
             self.log_message("Plotting results")
-            self.ax_s.clear(); self.ax_th.clear(); self.ax_ph.clear()
 
-            # ----- S11 -----
+            # ---------- S11 ----------
+            self.ax_s11.clear()
+            # tenta pegar o 1º nome de porta
             try:
                 exs = self.hfss.get_excitations_name() or []
             except Exception:
@@ -987,51 +1126,90 @@ class ModernPatchAntennaDesigner:
                 p = exs[0].split(":")[0]
                 expr = f"dB(S({p},{p}))"
 
-            rpt = self.hfss.post.reports_by_category.standard(expressions=[expr])
-            rpt.context = ["Setup1: Sweep1"]
-            sol = rpt.get_solution_data()
+            try:
+                rpt = self.hfss.post.reports_by_category.standard(expressions=[expr])
+                rpt.context = ["Setup1: Sweep1"]
+                sol = rpt.get_solution_data()
+            except Exception:
+                sol = None
+
+            ok_s11 = False
             if sol:
-                freqs = np.asarray(sol.primary_sweep_values, dtype=float)
-                data = sol.data_real()
-                y = np.asarray(data[0] if isinstance(data, (list, tuple)) and len(data) > 0 else data, dtype=float)
-                if y.size == freqs.size:
-                    self.simulation_data = np.column_stack((freqs, y))
-                    self.ax_s.plot(freqs, y, linewidth=2, label=expr)
-                    self.ax_s.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
-                    self.ax_s.set_xlabel("Frequency (GHz)")
-                    self.ax_s.set_ylabel("S-Parameter (dB)")
-                    self.ax_s.set_title("S11")
-                    self.ax_s.legend(); self.ax_s.grid(True)
+                try:
+                    freqs = np.asarray(sol.primary_sweep_values, dtype=float)
+                    data = sol.data_real()
+                    # data pode ser lista de arrays OU float; tratar robusto
+                    if isinstance(data, (list, tuple)) and len(data) > 0 and hasattr(data[0], "__len__"):
+                        y = np.asarray(data[0], dtype=float)
+                    else:
+                        y = np.asarray(data, dtype=float)
+                    if y.size == freqs.size:
+                        self.simulation_data = np.column_stack((freqs, y))
+                        self.ax_s11.plot(freqs, y, label=expr, linewidth=2)
+                        self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
+                        self.ax_s11.set_xlabel("Frequency (GHz)")
+                        self.ax_s11.set_ylabel("S-Parameter (dB)")
+                        self.ax_s11.set_title("S11 - Coax-fed Patch Array (Lumped Ports)")
+                        self.ax_s11.legend()
+                        self.ax_s11.grid(True, alpha=0.5)
+                        cf = float(self.params["frequency"])
+                        self.ax_s11.axvline(x=cf, linestyle='--', alpha=0.7)
+                        self.ax_s11.text(cf, self.ax_s11.get_ylim()[1]*0.9, f'{cf} GHz')
+                        ok_s11 = True
+                except Exception:
+                    ok_s11 = False
 
-            # ----- Far-field cuts (se houver esfera) -----
+            if not ok_s11:
+                # fallback S(1,1)
+                try:
+                    rpt = self.hfss.post.reports_by_category.standard(expressions=["dB(S(1,1))"])
+                    rpt.context = ["Setup1: Sweep1"]
+                    sol = rpt.get_solution_data()
+                    if sol:
+                        freqs = np.asarray(sol.primary_sweep_values, dtype=float)
+                        data = sol.data_real()
+                        y = np.asarray(data[0] if isinstance(data, (list, tuple)) and len(data) > 0 else data,
+                                       dtype=float)
+                        if y.size == freqs.size:
+                            self.simulation_data = np.column_stack((freqs, y))
+                            self.ax_s11.plot(freqs, y, label="dB(S(1,1))", linewidth=2)
+                            self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
+                            self.ax_s11.set_xlabel("Frequency (GHz)")
+                            self.ax_s11.set_ylabel("S-Parameter (dB)")
+                            self.ax_s11.set_title("S11 - Coax-fed Patch Array (Lumped Ports)")
+                            self.ax_s11.legend()
+                            self.ax_s11.grid(True, alpha=0.5)
+                except Exception as e:
+                    self.log_message(f"S11 plotting warning: {e}")
+
+            # ---------- Far-Field cuts ----------
+            self.ax_th.clear()
+            self.ax_ph.clear()
             f0 = float(self.params["frequency"])
-            if sphere_name:
-                th, gth = self._get_gain_cut(sphere_name, f0, cut="theta", fixed_angle_deg=0.0)
-                if th is not None:
-                    self.ax_th.plot(th, gth, linewidth=2)
-                    self.ax_th.set_xlabel("Theta (deg)")
-                    self.ax_th.set_ylabel("GainTotal (dB)")
-                    self.ax_th.set_title("Theta-cut @ Phi = 0°")
-                    self.ax_th.grid(True)
-                else:
-                    self.ax_th.text(0.5, 0.5, "Theta-cut unavailable", transform=self.ax_th.transAxes,
-                                    ha="center", va="center")
 
-                ph, gph = self._get_gain_cut(sphere_name, f0, cut="phi", fixed_angle_deg=90.0)
-                if ph is not None:
-                    self.ax_ph.plot(ph, gph, linewidth=2)
-                    self.ax_ph.set_xlabel("Phi (deg)")
-                    self.ax_ph.set_ylabel("GainTotal (dB)")
-                    self.ax_ph.set_title("Phi-cut @ Theta = 90°")
-                    self.ax_ph.grid(True)
-                else:
-                    self.ax_ph.text(0.5, 0.5, "Phi-cut unavailable", transform=self.ax_ph.transAxes,
-                                    ha="center", va="center")
+            # Corte de THETA fixando Phi=0°
+            th, gth = self._get_gain_cut(f0, cut="theta", fixed_angle_deg=0.0)
+            if th is not None and gth is not None and len(th) == len(gth) and len(th) > 0:
+                self.ax_th.plot(th, gth, linewidth=2)
+                self.ax_th.set_xlabel("Theta (deg)")
+                self.ax_th.set_ylabel("Gain (dB)")
+                self.ax_th.set_title("Radiation Pattern - Theta cut (Phi = 0°)")
+                self.ax_th.grid(True, alpha=0.5)
             else:
-                self.ax_th.text(0.5, 0.5, "Far-field sphere not created", transform=self.ax_th.transAxes,
-                                ha="center", va="center")
-                self.ax_ph.text(0.5, 0.5, "Far-field sphere not created", transform=self.ax_ph.transAxes,
-                                ha="center", va="center")
+                self.ax_th.text(0.5, 0.5, "Theta-cut gain not available",
+                                transform=self.ax_th.transAxes, ha="center", va="center")
+
+            # Corte de PHI fixando Theta=90°
+            ph, gph = self._get_gain_cut(f0, cut="phi", fixed_angle_deg=90.0)
+            if ph is not None and gph is not None and len(ph) == len(gph) and len(ph) > 0:
+                self.ax_ph.plot(ph, gph, linewidth=2)
+                self.ax_ph.set_xlabel("Phi (deg)")
+                self.ax_ph.set_ylabel("Gain (dB)")
+                self.ax_ph.set_title("Radiation Pattern - Phi cut (Theta = 90°)")
+                self.ax_ph.grid(True, alpha=0.5)
+            else:
+                self.ax_ph.text(0.5, 0.5, "Phi-cut gain not available",
+                                transform=self.ax_ph.transAxes, ha="center", va="center")
 
             self.fig.tight_layout()
             self.canvas.draw()
@@ -1067,11 +1245,8 @@ class ModernPatchAntennaDesigner:
     def on_closing(self):
         self.log_message("Application closing...")
         self.cleanup()
-        try:
-            self.window.quit()
-            self.window.destroy()
-        except Exception:
-            pass
+        self.window.quit()
+        self.window.destroy()
 
     def save_parameters(self):
         try:

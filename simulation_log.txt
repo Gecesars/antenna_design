@@ -1,0 +1,46 @@
+Log started at 2025-09-05 16:28:23
+[16:28:35] Starting parameter calculation
+[16:28:35] Getting parameters from interface
+[16:28:35] All parameters retrieved successfully
+[16:28:35] Array sizing -> target gain 12.0 dBi, N_req≈4, layout 2x2 (= 4 patches)
+[16:28:35] Substrate size calculated: 54.17 x 50.16 mm
+[16:28:35] Parameters calculated successfully
+[16:28:38] HFSS project not available yet. Run a simulation first or open a project.
+[16:28:44] Starting simulation
+[16:28:44] Getting parameters from interface
+[16:28:44] All parameters retrieved successfully
+[16:28:55] Created new project: C:\Users\geral\AppData\Local\Temp\tmp87z76oal.ansys\patch_array_20250905_162852.aedt (design 'patch_array')
+[16:28:55] Model units set to: mm
+[16:28:56] Air coax set: a=0.400 mm, b=0.920 mm (b/a=2.300≈2.3 → ~50 Ω)
+[16:28:56] Creating substrate
+[16:28:56] Creating ground plane
+[16:28:56] Creating 4 patches in 2x2 configuration
+[16:28:56] Creating patch 1 at (0, 0)
+[16:28:58] Lumped Port 'P1_Lumped' created (integration line).
+[16:28:58] Creating patch 2 at (0, 1)
+[16:29:00] Lumped Port 'P2_Lumped' created (integration line).
+[16:29:00] Creating patch 3 at (1, 0)
+[16:29:02] Lumped Port 'P3_Lumped' created (integration line).
+[16:29:02] Creating patch 4 at (1, 1)
+[16:29:04] Lumped Port 'P4_Lumped' created (integration line).
+[16:29:04] PerfectE assigned to: ['Ground', 'Patch_1', 'Patch_2', 'Patch_3', 'Patch_4']
+[16:29:04] Creating air region + radiation boundary
+[16:29:04] Creating simulation setup
+[16:29:04] Creating frequency sweep (Fast)
+[16:29:05] Assigning local mesh refinement
+[16:29:05] Excitations created: 4 -> ['P2_Lumped:1', 'P4_Lumped:1', 'P3_Lumped:1', 'P1_Lumped:1']
+[16:29:06] Initialized post-processing vars for 4 ports (Pow_Pi=1W, Phi_Pi=0deg).
+[16:29:06] Could not create Infinite Sphere (far-field reports may be unavailable).
+[16:29:06] Validating design
+[16:29:06] Starting analysis
+[16:31:00] Processing results
+[16:31:00] Plotting results
+[16:31:02] Radiation report failed for theta: 'Reports' object has no attribute 'radiation'
+[16:31:02] get_far_field_data fallback failed: 'bool' object has no attribute 'get'
+[16:31:02] Theta-cut gain not available (check Infinite Sphere / version).
+[16:31:02] Radiation report failed for phi: 'Reports' object has no attribute 'radiation'
+[16:31:02] get_far_field_data fallback failed: 'bool' object has no attribute 'get'
+[16:31:02] Phi-cut gain not available (check Infinite Sphere / version).
+[16:31:02] Results plotted successfully
+[16:31:02] Simulation completed successfully
+
