@@ -8,6 +8,8 @@ import traceback
 import queue
 import threading
 from typing import Tuple, List
+import tkinter as tk
+from tkinter import messagebox
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,10 +19,9 @@ import customtkinter as ctk
 import ansys.aedt.core
 from ansys.aedt.core import Desktop, Hfss
 
-# ---------- Aparência ----------
+# ---------- Aparência Moderna ----------
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
-
 
 class ModernPatchAntennaDesigner:
     def __init__(self):
@@ -34,6 +35,8 @@ class ModernPatchAntennaDesigner:
         self.is_simulation_running = False
         self.save_project = False
         self.stop_simulation = False
+        self.simulated_resonance_freq = None
+        self.simulation_data = None
 
         # -------- Parâmetros do usuário --------
         self.params = {
@@ -81,7 +84,7 @@ class ModernPatchAntennaDesigner:
         self.c = 299792458.0
         self.setup_gui()
 
-    # ---------------- GUI ----------------
+    # ---------------- GUI Modernizada ----------------
     def _maximize_with_taskbar(self):
         """Maximiza mantendo a barra de tarefas visível."""
         try:
@@ -106,87 +109,133 @@ class ModernPatchAntennaDesigner:
             pass
 
     def setup_gui(self):
+        # Configuração da janela principal
         self.window = ctk.CTk()
         self.window.title("Patch Antenna Array Designer")
-        self.window.geometry("1400x900")
+        self.window.geometry("1600x1000")
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self._maximize_with_taskbar()
-
+        
+        # Configuração do layout principal
         self.window.grid_columnconfigure(0, weight=1)
         self.window.grid_rowconfigure(1, weight=1)
-
-        header = ctk.CTkFrame(self.window, height=60, fg_color=("gray85", "gray20"))
-        header.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        header.grid_propagate(False)
-        ctk.CTkLabel(header, text="Patch Antenna Array Designer",
-                     font=ctk.CTkFont(size=22, weight="bold"),
-                     text_color=("gray10", "gray90")).pack(pady=12)
-
-        self.tabview = ctk.CTkTabview(self.window)
+        
+        # Barra de título moderna
+        title_bar = ctk.CTkFrame(self.window, height=70, fg_color=("#1E3F66", "#1A3560"), corner_radius=0)
+        title_bar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        title_bar.grid_propagate(False)
+        title_bar.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(title_bar, text="Patch Antenna Array Designer",
+                     font=ctk.CTkFont(size=24, weight="bold", family="Segoe UI"),
+                     text_color="white").pack(expand=True, pady=20)
+        
+        # Área principal avec tabs
+        self.tabview = ctk.CTkTabview(self.window, fg_color=("gray90", "gray15"), 
+                                     segmented_button_fg_color=("#3B8ED0", "#1F6AA5"),
+                                     segmented_button_selected_color=("#1F6AA5", "#1F538D"),
+                                     segmented_button_selected_hover_color=("#1F538D", "#1A4A7F"),
+                                     text_color=("white", "white"))
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        for name in ["Design Parameters", "Simulation", "Results", "Log"]:
+        
+        # Adicionar abas
+        tabs = ["Design Parameters", "Simulation", "Results", "Log"]
+        for name in tabs:
             self.tabview.add(name)
             self.tabview.tab(name).grid_columnconfigure(0, weight=1)
-
+        
+        # Configurar cada aba
         self.setup_parameters_tab()
         self.setup_simulation_tab()
         self.setup_results_tab()
         self.setup_log_tab()
-
-        status = ctk.CTkFrame(self.window, height=40)
-        status.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 6))
-        status.grid_propagate(False)
-        self.status_label = ctk.CTkLabel(status, text="Ready to calculate parameters",
-                                         font=ctk.CTkFont(weight="bold"))
-        self.status_label.pack(pady=8)
-
+        
+        # Barra de status moderna
+        status_bar = ctk.CTkFrame(self.window, height=40, fg_color=("#1E3F66", "#1A3560"), corner_radius=0)
+        status_bar.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+        status_bar.grid_propagate(False)
+        status_bar.grid_columnconfigure(0, weight=1)
+        
+        self.status_label = ctk.CTkLabel(status_bar, text="Ready to calculate parameters",
+                                         font=ctk.CTkFont(weight="bold", family="Segoe UI"),
+                                         text_color="white")
+        self.status_label.pack(side="left", padx=15, pady=8)
+        
+        # Iniciar processamento da fila de log
         self.process_log_queue()
+        self._maximize_with_taskbar()
 
-    def create_section(self, parent, title, row, column, padx=10, pady=10):
-        section = ctk.CTkFrame(parent, fg_color=("gray92", "gray18"))
-        section.grid(row=row, column=column, sticky="nsew", padx=padx, pady=pady)
+    def create_section(self, parent, title, row, column, padx=10, pady=10, colspan=1):
+        section = ctk.CTkFrame(parent, fg_color=("gray95", "gray20"), corner_radius=8)
+        section.grid(row=row, column=column, sticky="nsew", padx=padx, pady=pady, columnspan=colspan)
         section.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(section, text=title,
-                     font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color=("gray20", "gray80")).grid(row=0, column=0, sticky="w", padx=15, pady=(10, 6))
-        ctk.CTkFrame(section, height=2, fg_color=("gray70", "gray30")).grid(row=1, column=0, sticky="ew", padx=10)
+        
+        # Título da seção com estilo moderno
+        title_frame = ctk.CTkFrame(section, fg_color=("gray90", "gray25"), height=40, corner_radius=6)
+        title_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 0))
+        title_frame.grid_propagate(False)
+        
+        ctk.CTkLabel(title_frame, text=title,
+                     font=ctk.CTkFont(size=14, weight="bold", family="Segoe UI"),
+                     text_color=("gray20", "gray90")).pack(expand=True)
+        
         return section
 
     def setup_parameters_tab(self):
         tab = self.tabview.tab("Design Parameters")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-
-        main = ctk.CTkScrollableFrame(tab)
+        
+        # Frame principal com scroll
+        main = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         main.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        main.grid_columnconfigure(0, weight=1)
+        main.grid_columnconfigure((0, 1), weight=1, uniform="col")
+        main.grid_rowconfigure(0, weight=1)
 
         # ---------------- Antenna Parameters ----------------
-        sec_ant = self.create_section(main, "Antenna Parameters", 0, 0)
+        sec_ant = self.create_section(main, "Antenna Parameters", 0, 0, pady=12)
         entries = []
-        r = 2
+        r = 1
 
-        def add(section, label, key, value, row, combo=None, check=False):
-            ctk.CTkLabel(section, text=label, font=ctk.CTkFont(weight="bold")
-                         ).grid(row=row, column=0, padx=15, pady=6, sticky="w")
+        def add(section, label, key, value, row, combo=None, check=False, tooltip=None):
+            frame = ctk.CTkFrame(section, fg_color="transparent")
+            frame.grid(row=row, column=0, sticky="ew", padx=10, pady=6)
+            frame.grid_columnconfigure(0, weight=1)
+            frame.grid_columnconfigure(1, weight=2)
+            
+            ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(weight="bold", size=12),
+                         anchor="w").grid(row=0, column=0, padx=(0, 10), pady=2, sticky="w")
+            
             if combo:
                 var = ctk.StringVar(value=value)
-                w = ctk.CTkComboBox(section, values=combo, variable=var, width=220)
-                w.grid(row=row, column=1, padx=15, pady=6)
+                w = ctk.CTkComboBox(frame, values=combo, variable=var, width=220, 
+                                   dropdown_fg_color=("gray90", "gray25"),
+                                   button_color=("#3B8ED0", "#1F6AA5"))
+                w.grid(row=0, column=1, padx=(0, 10), pady=2, sticky="ew")
                 entries.append((key, var))
             elif check:
                 var = ctk.BooleanVar(value=value)
-                w = ctk.CTkCheckBox(section, text="", variable=var)
-                w.grid(row=row, column=1, padx=15, pady=6, sticky="w")
+                w = ctk.CTkCheckBox(frame, text="", variable=var, 
+                                   checkbox_width=18, checkbox_height=18,
+                                   fg_color=("#3B8ED0", "#1F6AA5"), hover_color=("#1F6AA5", "#1F538D"))
+                w.grid(row=0, column=1, padx=(0, 10), pady=2, sticky="w")
                 entries.append((key, var))
             else:
-                w = ctk.CTkEntry(section, width=220)
+                w = ctk.CTkEntry(frame, width=220, fg_color=("white", "gray25"),
+                                border_color=("#3B8ED0", "#1F6AA5"))
                 w.insert(0, str(value))
-                w.grid(row=row, column=1, padx=15, pady=6)
+                w.grid(row=0, column=1, padx=(0, 10), pady=2, sticky="ew")
                 entries.append((key, w))
+            
+            if tooltip:
+                # Adicionar ícone de informação com tooltip (implementação simplificada)
+                info_btn = ctk.CTkButton(frame, text="?", width=20, height=20,
+                                        fg_color=("gray70", "gray40"), hover_color=("gray60", "gray50"),
+                                        font=ctk.CTkFont(size=10, weight="bold"))
+                info_btn.grid(row=0, column=2, padx=(0, 5), pady=2)
+            
             return row + 1
 
-        r = add(sec_ant, "Central Frequency (GHz):", "frequency", self.params["frequency"], r)
+        r = add(sec_ant, "Central Frequency (GHz):", "frequency", self.params["frequency"], r, tooltip="Operating frequency in GHz")
         r = add(sec_ant, "Desired Gain (dBi):", "gain", self.params["gain"], r)
         r = add(sec_ant, "Sweep Start (GHz):", "sweep_start", self.params["sweep_start"], r)
         r = add(sec_ant, "Sweep Stop (GHz):", "sweep_stop", self.params["sweep_stop"], r)
@@ -194,8 +243,8 @@ class ModernPatchAntennaDesigner:
                 combo=["lambda/2", "lambda", "0.7*lambda", "0.8*lambda", "0.9*lambda"])
 
         # ---------------- Substrate Parameters ----------------
-        sec_sub = self.create_section(main, "Substrate Parameters", 1, 0)
-        r = 2
+        sec_sub = self.create_section(main, "Substrate Parameters", 0, 1, pady=12)
+        r = 1
         r = add(sec_sub, "Substrate Material:", "substrate_material",
                 self.params["substrate_material"], r,
                 combo=["Duroid (tm)", "Rogers RO4003C (tm)", "FR4_epoxy", "Air"])
@@ -204,9 +253,9 @@ class ModernPatchAntennaDesigner:
         r = add(sec_sub, "Substrate Thickness (mm):", "substrate_thickness", self.params["substrate_thickness"], r)
         r = add(sec_sub, "Metal Thickness (mm):", "metal_thickness", self.params["metal_thickness"], r)
 
-        # ---------------- Coax Parameters ----------------
-        sec_coax = self.create_section(main, "Coaxial Feed Parameters", 2, 0)
-        r = 2
+        # ---------------- Coaxial Feed Parameters ----------------
+        sec_coax = self.create_section(main, "Coaxial Feed Parameters", 1, 0, pady=12)
+        r = 1
         r = add(sec_coax, "Feed position type:", "feed_position", self.params["feed_position"], r,
                 combo=["inset", "edge"])
         r = add(sec_coax, "Feed relative X (0..1):", "feed_rel_x", self.params["feed_rel_x"], r)
@@ -217,8 +266,8 @@ class ModernPatchAntennaDesigner:
         r = add(sec_coax, "Anti-pad clearance (mm):", "antipad_clearance", self.params["antipad_clearance"], r)
 
         # ---------------- Simulation Settings ----------------
-        sec_sim = self.create_section(main, "Simulation Settings", 3, 0)
-        r = 2
+        sec_sim = self.create_section(main, "Simulation Settings", 1, 1, pady=12)
+        r = 1
         r = add(sec_sim, "CPU Cores:", "cores", self.params["cores"], r)
         r = add(sec_sim, "Show HFSS Interface:", "show_gui", not self.params["non_graphical"], r, check=True)
         r = add(sec_sim, "Save Project:", "save_project", self.save_project, r, check=True)
@@ -226,59 +275,89 @@ class ModernPatchAntennaDesigner:
         self.entries = entries
 
         # ---------------- Calculated Parameters ----------------
-        sec_calc = self.create_section(main, "Calculated Parameters", 4, 0)
-        grid = ctk.CTkFrame(sec_calc)
-        grid.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
-        grid.columnconfigure((0, 1), weight=1)
-
-        self.patches_label = ctk.CTkLabel(grid, text="Number of Patches: 4", font=ctk.CTkFont(weight="bold"))
-        self.patches_label.grid(row=0, column=0, sticky="w", pady=4)
-        self.rows_cols_label = ctk.CTkLabel(grid, text="Configuration: 2 x 2", font=ctk.CTkFont(weight="bold"))
-        self.rows_cols_label.grid(row=0, column=1, sticky="w", pady=4)
-        self.spacing_label = ctk.CTkLabel(grid, text="Spacing: -- mm", font=ctk.CTkFont(weight="bold"))
-        self.spacing_label.grid(row=1, column=0, sticky="w", pady=4)
+        sec_calc = self.create_section(main, "Calculated Parameters", 2, 0, pady=12, colspan=2)
+        grid = ctk.CTkFrame(sec_calc, fg_color="transparent")
+        grid.grid(row=1, column=0, sticky="nsew", padx=15, pady=10)
+        grid.columnconfigure((0, 1, 2, 3), weight=1, uniform="col")
+        
+        # Organização em grid 2x4 para melhor visualização
+        self.patches_label = ctk.CTkLabel(grid, text="Number of Patches: 4", 
+                                         font=ctk.CTkFont(weight="bold", size=12))
+        self.patches_label.grid(row=0, column=0, sticky="w", pady=4, padx=10)
+        
+        self.rows_cols_label = ctk.CTkLabel(grid, text="Configuration: 2 x 2", 
+                                           font=ctk.CTkFont(weight="bold", size=12))
+        self.rows_cols_label.grid(row=0, column=1, sticky="w", pady=4, padx=10)
+        
+        self.spacing_label = ctk.CTkLabel(grid, text="Spacing: -- mm", 
+                                         font=ctk.CTkFont(weight="bold", size=12))
+        self.spacing_label.grid(row=0, column=2, sticky="w", pady=4, padx=10)
+        
         self.dimensions_label = ctk.CTkLabel(grid, text="Patch Dimensions: -- x -- mm",
-                                             font=ctk.CTkFont(weight="bold"))
-        self.dimensions_label.grid(row=1, column=1, sticky="w", pady=4)
-        self.lambda_label = ctk.CTkLabel(grid, text="Guided Wavelength: -- mm", font=ctk.CTkFont(weight="bold"))
-        self.lambda_label.grid(row=2, column=0, sticky="w", pady=4)
-        self.feed_offset_label = ctk.CTkLabel(grid, text="Feed Offset (y): -- mm", font=ctk.CTkFont(weight="bold"))
-        self.feed_offset_label.grid(row=2, column=1, sticky="w", pady=4)
+                                            font=ctk.CTkFont(weight="bold", size=12))
+        self.dimensions_label.grid(row=0, column=3, sticky="w", pady=4, padx=10)
+        
+        self.lambda_label = ctk.CTkLabel(grid, text="Guided Wavelength: -- mm", 
+                                        font=ctk.CTkFont(weight="bold", size=12))
+        self.lambda_label.grid(row=1, column=0, sticky="w", pady=4, padx=10)
+        
+        self.feed_offset_label = ctk.CTkLabel(grid, text="Feed Offset (y): -- mm", 
+                                             font=ctk.CTkFont(weight="bold", size=12))
+        self.feed_offset_label.grid(row=1, column=1, sticky="w", pady=4, padx=10)
+        
         self.substrate_dims_label = ctk.CTkLabel(grid, text="Substrate Dimensions: -- x -- mm",
-                                                 font=ctk.CTkFont(weight="bold"))
-        self.substrate_dims_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+                                                font=ctk.CTkFont(weight="bold", size=12))
+        self.substrate_dims_label.grid(row=1, column=2, sticky="w", pady=4, padx=10, columnspan=2)
 
-        btns = ctk.CTkFrame(sec_calc)
-        btns.grid(row=3, column=0, sticky="ew", padx=15, pady=12)
+        # Botões de ação
+        btns = ctk.CTkFrame(sec_calc, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="ew", padx=15, pady=12, columnspan=2)
+        btns.grid_columnconfigure((0, 1, 2), weight=1)
+        
         ctk.CTkButton(btns, text="Calculate Parameters", command=self.calculate_parameters,
-                      fg_color="#2E8B57", hover_color="#3CB371", width=180).pack(side="left", padx=8)
+                      fg_color=("#2E8B57", "#2E8B57"), hover_color=("#3CB371", "#3CB371"), 
+                      height=36, font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=5)
+        
         ctk.CTkButton(btns, text="Save Parameters", command=self.save_parameters,
-                      fg_color="#4169E1", hover_color="#6495ED", width=140).pack(side="left", padx=8)
+                      fg_color=("#4169E1", "#4169E1"), hover_color=("#6495ED", "#6495ED"),
+                      height=36, font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=8, pady=5)
+        
         ctk.CTkButton(btns, text="Load Parameters", command=self.load_parameters,
-                      fg_color="#FF8C00", hover_color="#FFA500", width=140).pack(side="left", padx=8)
+                      fg_color=("#FF8C00", "#FF8C00"), hover_color=("#FFA500", "#FFA500"),
+                      height=36, font=ctk.CTkFont(weight="bold")).grid(row=0, column=2, padx=8, pady=5)
 
         # ---------------- Post-Processing Weights ----------------
-        self._build_postproc_section(main, row=5)
+        self._build_postproc_section(main, row=3)
 
     def _build_postproc_section(self, parent, row: int):
-        sec_pp = self.create_section(parent, "Post-Processing: Port Power & Phase", row, 0)
+        sec_pp = self.create_section(parent, "Post-Processing: Port Power & Phase", row, 0, colspan=2)
 
-        header = ctk.CTkFrame(sec_pp, fg_color=("gray88", "gray22"))
-        header.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 0))
-        for i, t in enumerate(["Port #", "Power (rel.)", "Phase (deg)"]):
-            ctk.CTkLabel(header, text=t, font=ctk.CTkFont(weight="bold")).grid(row=0, column=i, padx=10, pady=6)
+        # Cabeçalho da tabela
+        header = ctk.CTkFrame(sec_pp, fg_color=("gray88", "gray22"), height=40)
+        header.grid(row=1, column=0, sticky="ew", padx=12, pady=(8, 0))
         header.grid_columnconfigure((0, 1, 2), weight=1)
-
-        self.ports_table = ctk.CTkScrollableFrame(sec_pp, height=160)
-        self.ports_table.grid(row=3, column=0, sticky="nsew", padx=12, pady=8)
+        
+        for i, t in enumerate(["Port #", "Power (rel.)", "Phase (deg)"]):
+            ctk.CTkLabel(header, text=t, font=ctk.CTkFont(weight="bold", size=12)).grid(
+                row=0, column=i, padx=10, pady=10, sticky="w" if i==0 else "ew")
+        
+        # Tabela de portas com scroll
+        self.ports_table = ctk.CTkScrollableFrame(sec_pp, height=160, fg_color=("gray95", "gray18"))
+        self.ports_table.grid(row=2, column=0, sticky="nsew", padx=12, pady=8)
         self.ports_table.grid_columnconfigure((0, 1, 2), weight=1)
 
+        # Botões de ação
         row_btn = ctk.CTkFrame(sec_pp, fg_color="transparent")
-        row_btn.grid(row=4, column=0, sticky="ew", padx=12, pady=(2, 10))
+        row_btn.grid(row=3, column=0, sticky="ew", padx=12, pady=(2, 10))
+        row_btn.grid_columnconfigure((0, 1), weight=1)
+        
         ctk.CTkButton(row_btn, text="Reset (Broadside)", command=self._reset_port_weights,
-                      width=160).pack(side="left", padx=6)
+                      fg_color=("gray70", "gray40"), hover_color=("gray60", "gray50"),
+                      height=32).grid(row=0, column=0, padx=6, sticky="w")
+        
         ctk.CTkButton(row_btn, text="Apply to HFSS Vars", command=self.apply_postproc_variables,
-                      fg_color="#6A5ACD", hover_color="#7B68EE", width=170).pack(side="left", padx=6)
+                      fg_color=("#6A5ACD", "#6A5ACD"), hover_color=("#7B68EE", "#7B68EE"),
+                      height=32).grid(row=0, column=1, padx=6, sticky="e")
 
         self.update_ports_table(self.calculated_params["num_patches"])
 
@@ -289,19 +368,42 @@ class ModernPatchAntennaDesigner:
             self.port_params += [{"amp": 1.0, "phase": 0.0} for _ in range(n_ports - cur)]
         elif n_ports < cur:
             self.port_params = self.port_params[:n_ports]
-        for child in list(self.ports_table.children.values()):
-            child.destroy()
+        
+        # Limpar tabela atual
+        for widget in self.ports_table.winfo_children():
+            widget.destroy()
+            
         self.port_entries.clear()
+        
+        # Criar nova tabela
         for i in range(n_ports):
             idx = i + 1
-            ctk.CTkLabel(self.ports_table, text=f"P{idx}").grid(row=i, column=0, padx=10, pady=4, sticky="w")
-            e_amp = ctk.CTkEntry(self.ports_table, width=120)
+            
+            # Número da porta
+            port_label = ctk.CTkLabel(self.ports_table, text=f"P{idx}", 
+                                     font=ctk.CTkFont(weight="bold"))
+            port_label.grid(row=i, column=0, padx=10, pady=4, sticky="w")
+            
+            # Campo de amplitude
+            e_amp = ctk.CTkEntry(self.ports_table, width=100, 
+                                fg_color=("white", "gray25"),
+                                border_color=("#3B8ED0", "#1F6AA5"))
             e_amp.insert(0, str(self.port_params[i]["amp"]))
-            e_amp.grid(row=i, column=1, padx=10, pady=4, sticky="w")
-            e_ph = ctk.CTkEntry(self.ports_table, width=120)
+            e_amp.grid(row=i, column=1, padx=10, pady=4, sticky="ew")
+            
+            # Campo de fase
+            e_ph = ctk.CTkEntry(self.ports_table, width=100,
+                               fg_color=("white", "gray25"),
+                               border_color=("#3B8ED0", "#1F6AA5"))
             e_ph.insert(0, str(self.port_params[i]["phase"]))
-            e_ph.grid(row=i, column=2, padx=10, pady=4, sticky="w")
+            e_ph.grid(row=i, column=2, padx=10, pady=4, sticky="ew")
+            
             self.port_entries.append((e_amp, e_ph))
+            
+        # Configurar pesos das colunas
+        self.ports_table.grid_columnconfigure(0, weight=1)
+        self.ports_table.grid_columnconfigure(1, weight=2)
+        self.ports_table.grid_columnconfigure(2, weight=2)
 
     def _reset_port_weights(self):
         for p in self.port_params:
@@ -591,7 +693,7 @@ class ModernPatchAntennaDesigner:
                 name=f"{name_prefix}_GndHole", material="vacuum")
             self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
 
-            # folha do porto (anel a..b) em z = -Lp
+            # folja do porto (anel a..b) em z = -Lp
             port_ring = self.hfss.modeler.create_circle(
                 orientation="XY", origin=[x_feed, y_feed, -Lp_val],
                 radius=b_val, name=f"{name_prefix}_PortRing", material="vacuum")
@@ -641,85 +743,83 @@ class ModernPatchAntennaDesigner:
             self.log_message(f"Error initializing post-processing variables: {e}")
 
     # ---------- Infinite Sphere ----------
-# ---------- Infinite Sphere (compatível) ----------
     def _create_infinite_sphere(self, name="FF_Sphere"):
-        # 1) Tenta helper do PyAEDT (se existir nessa versão)
         try:
-            fn = getattr(self.hfss, "create_infinite_sphere", None) or getattr(self.hfss, "insert_infinite_sphere", None)
-            if fn:
-                # HFSS usa Theta 0..180; Phi -180..180
-                fn(
+            if hasattr(self.hfss, "create_infinite_sphere"):
+                self.hfss.create_infinite_sphere(
+                    name=name,
+                    theta_start=-180, theta_stop=180, theta_step=1,
+                    phi_start=-180,   phi_stop=180,   phi_step=1
+                )
+                self.log_message(f"Infinite Sphere '{name}' created: θ[-180,180] φ[-180,180] step 1°")
+                return name
+        except Exception as e:
+            self.log_message(f"Infinite Sphere API #1 failed: {e}")
+        try:
+            if hasattr(self.hfss, "create_infinite_sphere"):
+                self.hfss.create_infinite_sphere(
                     name=name,
                     theta_start=0, theta_stop=180, theta_step=1,
                     phi_start=-180, phi_stop=180, phi_step=1
                 )
-                self.log_message(f"Infinite Sphere '{name}' criada (θ 0..180, φ -180..180, 1°).")
+                self.log_message(f"Infinite Sphere '{name}' created with θ[0,180] (fallback).")
                 return name
         except Exception as e:
-            self.log_message(f"Infinite Sphere helper falhou: {e}")
-
-        # 2) Fallback via COM (RadField)
-        try:
-            oRad = self.hfss.odesign.GetModule("RadField")
-            oRad.InsertFarFieldSphereSetup(
-                name,
-                [
-                    "UseCustomRadiationSurface:=", False,
-                    "CoordinateSystem:=", "Global",
-                    "ThetaStart:=", "0deg", "ThetaStop:=", "180deg", "ThetaStep:=", "1deg",
-                    "PhiStart:=", "-180deg", "PhiStop:=", "180deg", "PhiStep:=", "1deg"
-                ]
-            )
-            self.log_message(f"Infinite Sphere '{name}' criada via COM.")
-            return name
-        except Exception as e:
-            self.log_message(f"COM da Infinite Sphere falhou: {e}")
-
-        self.log_message("Não foi possível criar a Infinite Sphere (sem far-field).")
+            self.log_message(f"Infinite Sphere API fallback failed: {e}")
+        self.log_message("Could not create Infinite Sphere (far-field reports may be unavailable).")
         return None
 
-
-    # ---------- Far-field cuts (compatível) ----------
+    # ---------- Far-field cuts ----------
     def _get_gain_cut(self, sphere_name: str, freq_ghz: float, cut: str, fixed_angle_deg: float):
-        """Obtém corte de GainTotal via get_solution_data (categoria Far Fields)."""
+        expr = "GainTotal"
         fstr = f"{freq_ghz}GHz"
-        primary = "Theta" if cut.lower() == "theta" else "Phi"
-        families = {"Freq": [fstr]}
-
-        if primary == "Theta":
-            families["Phi"] = [f"{fixed_angle_deg}deg"]
-        else:
-            families["Theta"] = [f"{fixed_angle_deg}deg"]
-
-        # Contexto: usa a esfera se existir; senão tenta '3D' (algumas builds geram contexto 3D por padrão)
-        ctx_candidates = [c for c in [sphere_name, "Infinite Sphere1", "3D"] if c]
-
-        for ctx in ctx_candidates:
-            # tenta com LastAdaptive e depois com Sweep1
-            for setup in ("Setup1 : LastAdaptive", "Setup1 : Sweep1"):
+        try:
+            rpt = self.hfss.post.reports_by_category.radiation(expressions=[expr])
+            if cut.lower() == "theta":
+                rpt.primary_sweep = "Theta"
                 try:
-                    sol = self.hfss.post.get_solution_data(
-                        expressions="GainTotal",
-                        primary_sweep_variable=primary,
-                        families_dict=families,
-                        report_category="Far Fields",
-                        context=ctx,
-                        setup_sweep_name=setup
-                    )
-                    if not sol:
-                        continue
+                    rpt.others = {"Phi": [f"{fixed_angle_deg}deg"]}
+                except Exception:
+                    pass
+            else:
+                rpt.primary_sweep = "Phi"
+                try:
+                    rpt.others = {"Theta": [f"{fixed_angle_deg}deg"]}
+                except Exception:
+                    pass
+            try:
+                rpt.frequencies = [fstr]
+            except Exception:
+                pass
+            try:
+                rpt.context = {"Sphere": sphere_name, "Context": "Infinite Sphere"}
+            except Exception:
+               sol = rpt.get_solution_data()
+            if sol:
+                x = np.asarray(sol.primary_sweep_values, dtype=float)
+                ydata = sol.data_real()
+                y = np.asarray(ydata[0] if isinstance(ydata, (list, tuple)) else ydata, dtype=float)
+                return x, y
+        except Exception as e:
+            self.log_message(f"Radiation report failed for {cut}: {e}")
 
-                    x = np.asarray(sol.primary_sweep_values, dtype=float)
-                    data = sol.data_real()
-                    y = np.asarray(data[0] if isinstance(data, (list, tuple)) else data, dtype=float)
-
-                    if x.size and y.size and x.size == y.size:
-                        return x, y
-                except Exception as e:
-                    # tenta o próximo contexto/setup
-                    self.log_message(f"Far-field ({cut}) via '{ctx}' / '{setup}' falhou: {e}")
-                    continue
-
+        try:
+            getter = getattr(self.hfss.post, "get_far_field_data", None)
+            if getter:
+                ff = getter(sphere_name=sphere_name, freq=fstr)
+                th = np.asarray(ff.get("theta", []), dtype=float)
+                ph = np.asarray(ff.get("phi", []), dtype=float)
+                g  = np.asarray(ff.get("gain_total", []), dtype=float)
+                if cut.lower() == "theta":
+                    mask = np.isclose(ph, fixed_angle_deg, atol=1e-6)
+                    if mask.any():
+                        return th[mask], g[mask]
+                else:
+                    mask = np.isclose(th, fixed_angle_deg, atol=1e-6)
+                    if mask.any():
+                        return ph[mask], g[mask]
+        except Exception as e:
+            self.log_message(f"get_far_field_data fallback failed: {e}")
         return None, None
 
     # ------------- Simulação -------------
@@ -947,6 +1047,9 @@ class ModernPatchAntennaDesigner:
             self.progress_bar.set(1.0)
             self.sim_status_label.configure(text="Simulation completed")
             self.log_message("Simulation completed successfully")
+            
+            # Habilitar botão de ajuste após simulação
+            self.adjust_button.configure(state="normal")
         except Exception as e:
             self.log_message(f"Error in simulation: {e}")
             self.log_message(f"Traceback: {traceback.format_exc()}")
@@ -956,49 +1059,124 @@ class ModernPatchAntennaDesigner:
             self.stop_button.configure(state="disabled")
             self.is_simulation_running = False
 
+    def setup_simulation_tab(self):
+        tab = self.tabview.tab("Simulation")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        main = ctk.CTkFrame(tab, fg_color="transparent")
+        main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        main.grid_columnconfigure(0, weight=1)
+
+        # Título
+        title = ctk.CTkLabel(main, text="Simulation Control", 
+                            font=ctk.CTkFont(size=18, weight="bold", family="Segoe UI"))
+        title.pack(pady=10)
+
+        # Container para botões
+        btn_container = ctk.CTkFrame(main, fg_color="transparent")
+        btn_container.pack(pady=20)
+        
+        self.run_button = ctk.CTkButton(btn_container, text="Run Simulation", 
+                                       command=self.start_simulation_thread,
+                                       fg_color=("#2E8B57", "#2E8B57"), 
+                                       hover_color=("#3CB371", "#3CB371"), 
+                                       height=45, width=180,
+                                       font=ctk.CTkFont(size=14, weight="bold"))
+        self.run_button.pack(side="left", padx=15)
+        
+        self.stop_button = ctk.CTkButton(btn_container, text="Stop Simulation", 
+                                        command=self.stop_simulation_thread,
+                                        fg_color=("#DC143C", "#DC143C"), 
+                                        hover_color=("#FF4500", "#FF4500"),
+                                        state="disabled", height=45, width=180,
+                                        font=ctk.CTkFont(size=14, weight="bold"))
+        self.stop_button.pack(side="left", padx=15)
+
+        # Barra de progresso
+        progress_frame = ctk.CTkFrame(main, fg_color="transparent")
+        progress_frame.pack(fill="x", padx=50, pady=20)
+        
+        ctk.CTkLabel(progress_frame, text="Simulation Progress:", 
+                    font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(0, 10))
+        
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=20, 
+                                              progress_color=("#3B8ED0", "#1F6AA5"))
+        self.progress_bar.pack(fill="x", pady=5)
+        self.progress_bar.set(0)
+
+        # Status da simulação
+        self.sim_status_label = ctk.CTkLabel(main, text="Simulation not started",
+                                            font=ctk.CTkFont(weight="bold", size=14))
+        self.sim_status_label.pack(pady=15)
+
+        # Nota
+        note = ctk.CTkFrame(main, fg_color=("gray90", "gray15"), corner_radius=8)
+        note.pack(fill="x", padx=20, pady=20)
+        
+        ctk.CTkLabel(note, text="Note: Simulation time increases with array size.",
+                    font=ctk.CTkFont(size=12, slant="italic"),
+                    text_color=("gray40", "gray60")).pack(padx=15, pady=15)
+
     # ---------------- Results Tab / Plots ----------------
     def setup_results_tab(self):
         tab = self.tabview.tab("Results")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        main = ctk.CTkFrame(tab)
+        main = ctk.CTkFrame(tab, fg_color="transparent")
         main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(main, text="Simulation Results", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0,
-                                                                                                     pady=10)
-        graph = ctk.CTkFrame(main)
-        graph.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        graph.grid_columnconfigure(0, weight=1)
-        graph.grid_rowconfigure(0, weight=1)
+        # Título
+        title = ctk.CTkLabel(main, text="Simulation Results", 
+                            font=ctk.CTkFont(size=18, weight="bold", family="Segoe UI"))
+        title.grid(row=0, column=0, pady=10)
 
-        # 3 subplots: S11 | Gain vs Theta (phi=0) | Gain vs Phi (theta=90)
+        # Container dos gráficos
+        graph_container = ctk.CTkFrame(main, fg_color=("gray95", "gray20"), corner_radius=8)
+        graph_container.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        graph_container.grid_columnconfigure(0, weight=1)
+        graph_container.grid_rowconfigure(0, weight=1)
+
+        # Configuração dos gráficos com tema escuro
+        plt.style.use('dark_background')
         self.fig, (self.ax_s11, self.ax_theta, self.ax_phi) = plt.subplots(1, 3, figsize=(14, 5))
-        face = '#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF'
-        for ax in (self.ax_s11, self.ax_theta, self.ax_phi):
-            ax.set_facecolor(face)
-        self.fig.set_facecolor(face)
+        
+        # Ajustar cores para modo escuro
         if ctk.get_appearance_mode() == "Dark":
+            self.fig.patch.set_facecolor('#2B2B2B')
             for ax in (self.ax_s11, self.ax_theta, self.ax_phi):
+                ax.set_facecolor('#2B2B2B')
                 ax.tick_params(colors='white')
                 ax.xaxis.label.set_color('white')
                 ax.yaxis.label.set_color('white')
                 ax.title.set_color('white')
-                for s in ['bottom', 'top', 'right', 'left']:
-                    ax.spines[s].set_color('white')
+                for spine in ax.spines.values():
+                    spine.set_color('white')
                 ax.grid(color='gray')
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_container)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        exp = ctk.CTkFrame(main)
-        exp.grid(row=2, column=0, pady=8)
-        ctk.CTkButton(exp, text="Export CSV", command=self.export_csv,
-                      fg_color="#6A5ACD", hover_color="#7B68EE").pack(side="left", padx=8)
-        ctk.CTkButton(exp, text="Export PNG", command=self.export_png,
-                      fg_color="#20B2AA", hover_color="#40E0D0").pack(side="left", padx=8)
+        # Botões de exportação
+        export_frame = ctk.CTkFrame(main, fg_color="transparent")
+        export_frame.grid(row=2, column=0, pady=15)
+        
+        ctk.CTkButton(export_frame, text="Export CSV", command=self.export_csv,
+                      fg_color=("#6A5ACD", "#6A5ACD"), hover_color=("#7B68EE", "#7B68EE"),
+                      height=35, width=120).pack(side="left", padx=10)
+        
+        ctk.CTkButton(export_frame, text="Export PNG", command=self.export_png,
+                      fg_color=("#20B2AA", "#20B2AA"), hover_color=("#40E0D0", "#40E0D0"),
+                      height=35, width=120).pack(side="left", padx=10)
+        
+        # Botão de ajuste de frequência
+        self.adjust_button = ctk.CTkButton(export_frame, text="Adjust Frequency", command=self.adjust_frequency,
+                                          fg_color=("#FF8C00", "#FF8C00"), hover_color=("#FFA500", "#FFA500"),
+                                          height=35, width=120, state="disabled")
+        self.adjust_button.pack(side="left", padx=10)
 
     def plot_results(self):
         try:
@@ -1036,6 +1214,14 @@ class ModernPatchAntennaDesigner:
                     self.ax_s11.grid(True)
                     cf = float(self.params["frequency"])
                     self.ax_s11.axvline(x=cf, linestyle='--', alpha=0.7)
+                    
+                    # Encontrar a frequência de ressonância (mínimo de S11)
+                    min_idx = np.argmin(y)
+                    self.simulated_resonance_freq = freqs[min_idx]
+                    self.ax_s11.axvline(x=self.simulated_resonance_freq, linestyle='--', color='red', alpha=0.7)
+                    self.ax_s11.text(self.simulated_resonance_freq, np.min(y)-2, 
+                                    f'{self.simulated_resonance_freq:.2f} GHz', 
+                                    color='red', ha='center')
             else:
                 self.log_message("Could not get S11 data")
 
@@ -1073,65 +1259,83 @@ class ModernPatchAntennaDesigner:
             self.log_message(f"Error plotting results: {e}")
             self.log_message(f"Traceback: {traceback.format_exc()}")
 
-    # ---------------- Sim Tab / Log / IO ----------------
-    def setup_simulation_tab(self):
-        tab = self.tabview.tab("Simulation")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-
-        main = ctk.CTkFrame(tab)
-        main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        main.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(main, text="Simulation Control", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
-
-        row = ctk.CTkFrame(main)
-        row.pack(pady=14)
-        self.run_button = ctk.CTkButton(row, text="Run Simulation", command=self.start_simulation_thread,
-                                        fg_color="#2E8B57", hover_color="#3CB371", height=40, width=160)
-        self.run_button.pack(side="left", padx=8)
-        self.stop_button = ctk.CTkButton(row, text="Stop Simulation", command=self.stop_simulation_thread,
-                                         fg_color="#DC143C", hover_color="#FF4500",
-                                         state="disabled", height=40, width=160)
-        self.stop_button.pack(side="left", padx=8)
-
-        bar = ctk.CTkFrame(main)
-        bar.pack(fill="x", padx=50, pady=8)
-        ctk.CTkLabel(bar, text="Simulation Progress:", font=ctk.CTkFont(weight="bold")).pack(anchor="w")
-        self.progress_bar = ctk.CTkProgressBar(bar, height=18)
-        self.progress_bar.pack(fill="x", pady=6)
-        self.progress_bar.set(0)
-
-        self.sim_status_label = ctk.CTkLabel(main, text="Simulation not started",
-                                             font=ctk.CTkFont(weight="bold"))
-        self.sim_status_label.pack(pady=8)
-
-        note = ctk.CTkFrame(main, fg_color=("gray90", "gray15"))
-        note.pack(fill="x", padx=20, pady=10)
-        ctk.CTkLabel(note, text="Obs.: o tempo de simulação cresce com o tamanho do array.",
-                     font=ctk.CTkFont(size=12, slant="italic"),
-                     text_color=("gray40", "gray60")).pack(padx=10, pady=10)
+    def adjust_frequency(self):
+        """Ajusta a frequência com base na diferença entre a ressonância simulada e a especificada."""
+        if not hasattr(self, 'simulated_resonance_freq') or self.simulated_resonance_freq is None:
+            self.log_message("No simulation data available for frequency adjustment")
+            return
+            
+        specified_freq = self.params["frequency"]
+        simulated_freq = self.simulated_resonance_freq
+        delta_f = (specified_freq - simulated_freq) * 1000  # Diferença em MHz
+        
+        # Perguntar ao usuário se deseja ajustar
+        response = messagebox.askyesno(
+            "Frequency Adjustment",
+            f"Specified frequency: {specified_freq:.3f} GHz\n"
+            f"Simulated resonance: {simulated_freq:.3f} GHz\n"
+            f"Difference: {delta_f:.2f} MHz\n\n"
+            "Do you want to adjust the parameters to correct the frequency?"
+        )
+        
+        if response:
+            # Calcular fator de ajuste baseado na relação de comprimento de onda
+            # λ_simulado / λ_especificado = f_especificado / f_simulado
+            # Queremos ajustar as dimensões por este fator
+            scaling_factor = specified_freq / simulated_freq
+            
+            # Ajustar a frequência para o valor especificado
+            # e recalcular todos os parâmetros dependentes de frequência
+            self.log_message(f"Adjusting parameters with scaling factor: {scaling_factor:.4f}")
+            
+            # Atualizar a frequência na interface
+            for key, widget in self.entries:
+                if key == "frequency":
+                    if isinstance(widget, ctk.CTkEntry):
+                        widget.delete(0, "end")
+                        widget.insert(0, str(specified_freq))
+            
+            # Recalcular todos os parâmetros
+            self.calculate_parameters()
+            
+            # Executar nova simulação
+            self.start_simulation_thread()
 
     def setup_log_tab(self):
         tab = self.tabview.tab("Log")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        main = ctk.CTkFrame(tab)
+        main = ctk.CTkFrame(tab, fg_color="transparent")
         main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(main, text="Simulation Log", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0,
-                                                                                                  pady=10)
-        self.log_text = ctk.CTkTextbox(main, width=900, height=500, font=ctk.CTkFont(family="Consolas"))
+        # Título
+        title = ctk.CTkLabel(main, text="Simulation Log", 
+                            font=ctk.CTkFont(size=18, weight="bold", family="Segoe UI"))
+        title.grid(row=0, column=0, pady=10)
+
+        # Área de texto do log
+        self.log_text = ctk.CTkTextbox(main, width=900, height=500, 
+                                      font=ctk.CTkFont(family="Consolas", size=12),
+                                      fg_color=("gray95", "gray20"),
+                                      border_color=("#3B8ED0", "#1F6AA5"),
+                                      border_width=1)
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         self.log_text.insert("1.0", "Log started at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
 
-        btn = ctk.CTkFrame(main)
-        btn.grid(row=2, column=0, pady=8)
-        ctk.CTkButton(btn, text="Clear Log", command=self.clear_log).pack(side="left", padx=8)
-        ctk.CTkButton(btn, text="Save Log", command=self.save_log).pack(side="left", padx=8)
+        # Botões de ação do log
+        btn_frame = ctk.CTkFrame(main, fg_color="transparent")
+        btn_frame.grid(row=2, column=0, pady=10)
+        
+        ctk.CTkButton(btn_frame, text="Clear Log", command=self.clear_log,
+                      fg_color=("gray70", "gray40"), hover_color=("gray60", "gray50"),
+                      height=32, width=100).pack(side="left", padx=10)
+        
+        ctk.CTkButton(btn_frame, text="Save Log", command=self.save_log,
+                      fg_color=("#3B8ED0", "#1F6AA5"), hover_color=("#1F6AA5", "#1F538D"),
+                      height=32, width=100).pack(side="left", padx=10)
 
     def log_message(self, message):
         self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
