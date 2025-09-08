@@ -1,48 +1,84 @@
 # -*- coding: utf-8 -*-
+"""
+Modern Patch Antenna Designer (v2)
+---------------------------------
+Aprimoramentos chave em relação ao original:
+- Comentários e docstrings detalhados para manutenção.
+- Validação de parâmetros de entrada com mensagens de log consistentes.
+- Criação **idempotente** de variáveis de pós-processamento (p_i / ph_i):
+  tenta alterar, se não existir cria; registra logs claros.
+- Robustez na obtenção de dados de solução (varia candidatos de setup, contexto e
+  formatação de expressões; registra último erro relevante).
+- Exportações adicionais (cortes e 3D) sem alterar o fluxo principal.
+- Melhorias de UX (estado de botões, progresso, mensagens).
+
+Observação: Este script assume um ambiente com Ansys Electronics Desktop (AEDT)
+instalado/licenciado e PyAEDT compatível disponível. O backend TkAgg do
+Matplotlib é usado conforme a UI baseada em Tkinter.
+"""
+
 import os
+import re
 import tempfile
-import time
 from datetime import datetime
 import math
 import json
 import traceback
 import queue
 import threading
-import tkinter as tk
-from tkinter import messagebox, ttk
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Tuple, List, Optional, Dict
 
 import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")  # Necessário para embutir em Tk
 import matplotlib.pyplot as plt
+from matplotlib import cm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (necessário para mplot3d)
 import customtkinter as ctk
 
-import ansys.aedt.core
 from ansys.aedt.core import Desktop, Hfss
 
-# ---------- Appearance ----------
+# ---------- Aparência ----------
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
 class ModernPatchAntennaDesigner:
+    """Aplicativo GUI para dimensionamento e simulação de *patch array* em HFSS.
+
+    Fluxo principal:
+        1) Usuário define parâmetros e clica em "Calculate Parameters".
+        2) Usuário executa a simulação (tab Simulation) -> geometria + setup + solve.
+        3) Pós-processamento cria variáveis p_i/ph_i e UI de *beamforming*.
+        4) Resultados: S11/VSWR/|Z|, cortes de ganho e superfície 3D.
+    """
+
+    # ---------------- Inicialização ----------------
     def __init__(self):
-        self.hfss = None
+        # AEDT
+        self.hfss: Optional[Hfss] = None
         self.desktop: Optional[Desktop] = None
         self.temp_folder = None
         self.project_path = ""
         self.project_display_name = "patch_array"
         self.design_base_name = "patch_array"
+
+        # Runtime
         self.log_queue = queue.Queue()
         self.is_simulation_running = False
         self.save_project = False
         self.stop_simulation = False
-        self.simulation_data = None
-        self.original_params = {}  # Store original parameters for comparison
-        self.optimized = False  # Track if we're in optimized mode
-        self.optimization_history = []  # Track optimization steps
+        self.created_ports: List[str] = []
 
-        # -------- User Parameters --------
+        # Dados em memória
+        self.last_s11_analysis = None  # dict: f, s11_db, |Z|, f_res, Z(f_res) etc
+        self.theta_cut = None          # (theta, gain)
+        self.phi_cut = None            # (phi, gain)
+        self.grid3d = None             # (TH, PH, Gdb)
+        self.auto_refresh_job = None
+
+        # Parâmetros do usuário (default)
         self.params = {
             "frequency": 10.0,             # GHz
             "gain": 12.0,                  # dBi
@@ -57,19 +93,21 @@ class ModernPatchAntennaDesigner:
             "metal_thickness": 0.035,      # mm
             "er": 2.2,
             "tan_d": 0.0009,
-            "feed_position": "inset",      # edge|inset
+            "feed_position": "inset",     # edge|inset
             "feed_rel_x": 0.485,
             "probe_radius": 0.40,          # mm (a)
-            "coax_er": 1.0,
             "coax_ba_ratio": 2.3,
             "coax_wall_thickness": 0.20,   # mm
             "coax_port_length": 3.0,       # mm
             "antipad_clearance": 0.10,     # mm
             "sweep_type": "Interpolating",  # "Discrete" | "Interpolating" | "Fast"
-            "sweep_step": 0.02              # GHz (used in Discrete)
+            "sweep_step": 0.02,            # GHz (Discrete)
+            # Amostragem 3D
+            "theta_step": 10.0,            # deg
+            "phi_step": 10.0               # deg
         }
 
-        # -------- Calculated Parameters --------
+        # Parâmetros calculados
         self.calculated_params = {
             "num_patches": 4,
             "spacing": 0.0,
@@ -88,939 +126,271 @@ class ModernPatchAntennaDesigner:
 
     # ---------------- GUI ----------------
     def setup_gui(self):
+        """Constroi a janela principal e abas."""
         self.window = ctk.CTk()
         self.window.title("Patch Antenna Array Designer")
-        self.window.geometry("1600x1000")
+        try:
+            self.window.state("zoomed")
+        except Exception:
+            self.window.geometry("1500x950")
 
-        # Configure grid
         self.window.grid_columnconfigure(0, weight=1)
         self.window.grid_rowconfigure(1, weight=1)
 
-        # Header
-        header = ctk.CTkFrame(self.window, height=80, fg_color=("gray85", "gray20"))
+        header = ctk.CTkFrame(self.window, height=70, fg_color=("gray85", "gray20"))
         header.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         header.grid_propagate(False)
-        
-        title_label = ctk.CTkLabel(
-            header, 
-            text="Patch Antenna Array Designer",
+        ctk.CTkLabel(
+            header, text="Patch Antenna Array Designer",
             font=ctk.CTkFont(size=28, weight="bold"),
             text_color=("gray10", "gray90")
-        )
-        title_label.pack(pady=20)
+        ).pack(pady=18)
 
-        # Tab view
         self.tabview = ctk.CTkTabview(self.window)
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        
-        # Add tabs
-        tabs = ["Design Parameters", "Simulation", "Results", "Log", "Parameters Summary"]
-        for tab_name in tabs:
-            self.tabview.add(tab_name)
-            self.tabview.tab(tab_name).grid_columnconfigure(0, weight=1)
+        for name in ["Design Parameters", "Simulation", "Results", "Log"]:
+            self.tabview.add(name)
+            self.tabview.tab(name).grid_columnconfigure(0, weight=1)
 
         self.setup_parameters_tab()
         self.setup_simulation_tab()
         self.setup_results_tab()
         self.setup_log_tab()
-        self.setup_parameters_summary_tab()
 
-        # Status bar
-        status = ctk.CTkFrame(self.window, height=40)
+        status = ctk.CTkFrame(self.window, height=38)
         status.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 6))
         status.grid_propagate(False)
-        
-        self.status_label = ctk.CTkLabel(
-            status, 
-            text="Ready to calculate parameters",
-            font=ctk.CTkFont(weight="bold")
-        )
-        self.status_label.pack(pady=8)
+        self.status_label = ctk.CTkLabel(status, text="Ready", font=ctk.CTkFont(weight="bold"))
+        self.status_label.pack(pady=6)
 
         self.process_log_queue()
 
     def create_section(self, parent, title, row, column, padx=10, pady=10):
+        """Cria um *frame* com título e separador para organizar a UI."""
         section = ctk.CTkFrame(parent, fg_color=("gray92", "gray18"))
         section.grid(row=row, column=column, sticky="nsew", padx=padx, pady=pady)
         section.grid_columnconfigure(0, weight=1)
-        
-        title_label = ctk.CTkLabel(
-            section, 
-            text=title,
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=("gray20", "gray80")
-        )
-        title_label.grid(row=0, column=0, sticky="w", padx=15, pady=(10, 6))
-        
-        separator = ctk.CTkFrame(section, height=2, fg_color=("gray70", "gray30"))
-        separator.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
-        
+        ctk.CTkLabel(section, text=title, font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=("gray20", "gray80")).grid(row=0, column=0, sticky="w", padx=15, pady=(10, 6))
+        ctk.CTkFrame(section, height=2, fg_color=("gray70", "gray30")).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
         return section
 
     def setup_parameters_tab(self):
+        """Aba de parâmetros de projeto/substrato/alimentação/simulação."""
         tab = self.tabview.tab("Design Parameters")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
+        main = ctk.CTkScrollableFrame(tab)
+        main.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        main.grid_columnconfigure(0, weight=1)
 
-        # Create scrollable frame
-        main_frame = ctk.CTkScrollableFrame(tab)
-        main_frame.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        main_frame.grid_columnconfigure(0, weight=1)
-
-        # Antenna Parameters section
-        sec_ant = self.create_section(main_frame, "Antenna Parameters", 0, 0)
+        sec_ant = self.create_section(main, "Antenna Parameters", 0, 0)
         self.entries = []
         row_idx = 2
 
-        def add_entry(section, label, key, value, row, combo=None, check=False, tooltip=None):
-            frame = ctk.CTkFrame(section, fg_color="transparent")
-            frame.grid(row=row, column=0, sticky="ew", padx=15, pady=6)
-            frame.grid_columnconfigure(0, weight=1)
-            
-            ctk.CTkLabel(
-                frame, 
-                text=label, 
-                font=ctk.CTkFont(weight="bold"),
-                width=220
-            ).grid(row=0, column=0, sticky="w")
-            
+        def add_entry(section, label, key, value, row, combo=None, check=False):
+            ctk.CTkLabel(section, text=label, font=ctk.CTkFont(weight="bold")
+                         ).grid(row=row, column=0, padx=15, pady=6, sticky="w")
             if combo:
                 var = ctk.StringVar(value=value)
-                widget = ctk.CTkComboBox(frame, values=combo, variable=var, width=220)
-                widget.grid(row=0, column=1, sticky="w")
+                widget = ctk.CTkComboBox(section, values=combo, variable=var, width=220)
+                widget.grid(row=row, column=1, padx=15, pady=6)
                 self.entries.append((key, var))
             elif check:
                 var = ctk.BooleanVar(value=value)
-                widget = ctk.CTkCheckBox(frame, text="", variable=var, width=30)
-                widget.grid(row=0, column=1, sticky="w")
+                widget = ctk.CTkCheckBox(section, text="", variable=var)
+                widget.grid(row=row, column=1, padx=15, pady=6, sticky="w")
                 self.entries.append((key, var))
             else:
-                widget = ctk.CTkEntry(frame, width=220)
+                widget = ctk.CTkEntry(section, width=220)
                 widget.insert(0, str(value))
-                widget.grid(row=0, column=1, sticky="w")
+                widget.grid(row=row, column=1, padx=15, pady=6)
                 self.entries.append((key, widget))
-            
-            # Add tooltip if provided
-            if tooltip:
-                self.create_tooltip(widget, tooltip)
-            
             return row + 1
 
-        # Add antenna parameters
-        row_idx = add_entry(sec_ant, "Central Frequency (GHz):", "frequency", self.params["frequency"], row_idx,
-                          tooltip="Operating frequency of the antenna array")
-        row_idx = add_entry(sec_ant, "Desired Gain (dBi):", "gain", self.params["gain"], row_idx,
-                          tooltip="Target gain for the antenna array")
-        row_idx = add_entry(sec_ant, "Sweep Start (GHz):", "sweep_start", self.params["sweep_start"], row_idx,
-                          tooltip="Start frequency for simulation sweep")
-        row_idx = add_entry(sec_ant, "Sweep Stop (GHz):", "sweep_stop", self.params["sweep_stop"], row_idx,
-                          tooltip="Stop frequency for simulation sweep")
-        row_idx = add_entry(
-            sec_ant, "Patch Spacing:", "spacing_type", self.params["spacing_type"], row_idx,
-            combo=["lambda/2", "lambda", "0.7*lambda", "0.8*lambda", "0.9*lambda"],
-            tooltip="Spacing between patch elements as a fraction of wavelength"
-        )
+        row_idx = add_entry(sec_ant, "Central Frequency (GHz):", "frequency", self.params["frequency"], row_idx)
+        row_idx = add_entry(sec_ant, "Desired Gain (dBi):", "gain", self.params["gain"], row_idx)
+        row_idx = add_entry(sec_ant, "Sweep Start (GHz):", "sweep_start", self.params["sweep_start"], row_idx)
+        row_idx = add_entry(sec_ant, "Sweep Stop (GHz):", "sweep_stop", self.params["sweep_stop"], row_idx)
+        row_idx = add_entry(sec_ant, "Patch Spacing:", "spacing_type", self.params["spacing_type"], row_idx,
+                            combo=["lambda/2", "lambda", "0.7*lambda", "0.8*lambda", "0.9*lambda"])
 
-        # Substrate Parameters section
-        sec_sub = self.create_section(main_frame, "Substrate Parameters", 1, 0)
+        sec_sub = self.create_section(main, "Substrate Parameters", 1, 0)
         row_idx = 2
-        
-        row_idx = add_entry(
-            sec_sub, "Substrate Material:", "substrate_material",
-            self.params["substrate_material"], row_idx,
-            combo=["Duroid (tm)", "Rogers RO4003C (tm)", "FR4_epoxy", "Air"],
-            tooltip="Material used for the substrate"
-        )
-        row_idx = add_entry(sec_sub, "Relative Permittivity (εr):", "er", self.params["er"], row_idx,
-                          tooltip="Dielectric constant of the substrate material")
-        row_idx = add_entry(sec_sub, "Loss Tangent (tan δ):", "tan_d", self.params["tan_d"], row_idx,
-                          tooltip="Loss tangent of the substrate material")
-        row_idx = add_entry(sec_sub, "Substrate Thickness (mm):", "substrate_thickness", self.params["substrate_thickness"], row_idx,
-                          tooltip="Thickness of the substrate in millimeters")
-        row_idx = add_entry(sec_sub, "Metal Thickness (mm):", "metal_thickness", self.params["metal_thickness"], row_idx,
-                          tooltip="Thickness of the metal traces in millimeters")
+        row_idx = add_entry(sec_sub, "Substrate Material:", "substrate_material",
+                            self.params["substrate_material"], row_idx,
+                            combo=["Duroid (tm)", "Rogers RO4003C (tm)", "FR4_epoxy", "Air"])
+        row_idx = add_entry(sec_sub, "Relative Permittivity (εr):", "er", self.params["er"], row_idx)
+        row_idx = add_entry(sec_sub, "Loss Tangent (tan δ):", "tan_d", self.params["tan_d"], row_idx)
+        row_idx = add_entry(sec_sub, "Substrate Thickness (mm):", "substrate_thickness", self.params["substrate_thickness"], row_idx)
+        row_idx = add_entry(sec_sub, "Metal Thickness (mm):", "metal_thickness", self.params["metal_thickness"], row_idx)
 
-        # Coaxial Feed Parameters section
-        sec_coax = self.create_section(main_frame, "Coaxial Feed Parameters", 2, 0)
+        sec_coax = self.create_section(main, "Coaxial Feed Parameters", 2, 0)
         row_idx = 2
-        
-        row_idx = add_entry(
-            sec_coax, "Feed position type:", "feed_position", self.params["feed_position"], row_idx,
-            combo=["inset", "edge"],
-            tooltip="Type of feed configuration for the patch antenna"
-        )
-        row_idx = add_entry(sec_coax, "Feed relative X (0..1):", "feed_rel_x", self.params["feed_rel_x"], row_idx,
-                          tooltip="Relative position of the feed along the patch width (0 to 1)")
-        row_idx = add_entry(sec_coax, "Inner radius a (mm):", "probe_radius", self.params["probe_radius"], row_idx,
-                          tooltip="Inner conductor radius of the coaxial feed")
-        row_idx = add_entry(sec_coax, "b/a ratio:", "coax_ba_ratio", self.params["coax_ba_ratio"], row_idx,
-                          tooltip="Ratio of outer to inner conductor radius")
-        row_idx = add_entry(sec_coax, "Shield wall (mm):", "coax_wall_thickness", self.params["coax_wall_thickness"], row_idx,
-                          tooltip="Thickness of the coaxial shield wall")
-        row_idx = add_entry(sec_coax, "Port length below GND Lp (mm):", "coax_port_length", self.params["coax_port_length"], row_idx,
-                          tooltip="Length of the coaxial port below ground")
-        row_idx = add_entry(sec_coax, "Anti-pad clearance (mm):", "antipad_clearance", self.params["antipad_clearance"], row_idx,
-                          tooltip="Clearance around the coaxial feed in the ground plane")
+        row_idx = add_entry(sec_coax, "Feed position type:", "feed_position", self.params["feed_position"], row_idx,
+                            combo=["inset", "edge"])
+        row_idx = add_entry(sec_coax, "Feed relative X (0..1):", "feed_rel_x", self.params["feed_rel_x"], row_idx)
+        row_idx = add_entry(sec_coax, "Inner radius a (mm):", "probe_radius", self.params["probe_radius"], row_idx)
+        row_idx = add_entry(sec_coax, "b/a ratio:", "coax_ba_ratio", self.params["coax_ba_ratio"], row_idx)
+        row_idx = add_entry(sec_coax, "Shield wall (mm):", "coax_wall_thickness", self.params["coax_wall_thickness"], row_idx)
+        row_idx = add_entry(sec_coax, "Port length below GND Lp (mm):", "coax_port_length", self.params["coax_port_length"], row_idx)
+        row_idx = add_entry(sec_coax, "Anti-pad clearance (mm):", "antipad_clearance", self.params["antipad_clearance"], row_idx)
 
-        # Simulation Settings section
-        sec_sim = self.create_section(main_frame, "Simulation Settings", 3, 0)
+        sec_sim = self.create_section(main, "Simulation Settings", 3, 0)
         row_idx = 2
-        
-        row_idx = add_entry(sec_sim, "CPU Cores:", "cores", self.params["cores"], row_idx,
-                          tooltip="Number of CPU cores to use for simulation")
-        row_idx = add_entry(sec_sim, "Show HFSS Interface:", "show_gui", not self.params["non_graphical"], row_idx, check=True,
-                          tooltip="Display HFSS graphical interface during simulation")
-        row_idx = add_entry(sec_sim, "Save Project:", "save_project", self.save_project, row_idx, check=True,
-                          tooltip="Save the HFSS project after simulation")
-        row_idx = add_entry(
-            sec_sim, "Sweep Type:", "sweep_type", self.params["sweep_type"], row_idx,
-            combo=["Discrete", "Interpolating", "Fast"],
-            tooltip="Type of frequency sweep for simulation"
-        )
-        row_idx = add_entry(sec_sim, "Discrete Step (GHz):", "sweep_step", self.params["sweep_step"], row_idx,
-                          tooltip="Frequency step for discrete sweep (GHz)")
+        row_idx = add_entry(sec_sim, "CPU Cores:", "cores", self.params["cores"], row_idx)
+        row_idx = add_entry(sec_sim, "Show HFSS Interface:", "show_gui", not self.params["non_graphical"], row_idx, check=True)
+        row_idx = add_entry(sec_sim, "Save Project:", "save_project", self.save_project, row_idx, check=True)
+        row_idx = add_entry(sec_sim, "Sweep Type:", "sweep_type", self.params["sweep_type"], row_idx,
+                            combo=["Discrete", "Interpolating", "Fast"])
+        row_idx = add_entry(sec_sim, "Discrete Step (GHz):", "sweep_step", self.params["sweep_step"], row_idx)
+        row_idx = add_entry(sec_sim, "3D Theta step (deg):", "theta_step", self.params["theta_step"], row_idx)
+        row_idx = add_entry(sec_sim, "3D Phi step (deg):", "phi_step", self.params["phi_step"], row_idx)
 
-        # Calculated Parameters section
-        sec_calc = self.create_section(main_frame, "Calculated Parameters", 4, 0)
-        
-        grid_frame = ctk.CTkFrame(sec_calc)
-        grid_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
-        grid_frame.columnconfigure((0, 1), weight=1)
-
-        self.patches_label = ctk.CTkLabel(grid_frame, text="Number of Patches: 4", font=ctk.CTkFont(weight="bold"))
+        sec_calc = self.create_section(main, "Calculated Parameters", 4, 0)
+        grid = ctk.CTkFrame(sec_calc); grid.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
+        grid.columnconfigure((0, 1), weight=1)
+        self.patches_label = ctk.CTkLabel(grid, text="Number of Patches: 4", font=ctk.CTkFont(weight="bold"))
         self.patches_label.grid(row=0, column=0, sticky="w", pady=4)
-        
-        self.rows_cols_label = ctk.CTkLabel(grid_frame, text="Configuration: 2 x 2", font=ctk.CTkFont(weight="bold"))
+        self.rows_cols_label = ctk.CTkLabel(grid, text="Configuration: 2 x 2", font=ctk.CTkFont(weight="bold"))
         self.rows_cols_label.grid(row=0, column=1, sticky="w", pady=4)
-        
-        self.spacing_label = ctk.CTkLabel(grid_frame, text="Spacing: -- mm", font=ctk.CTkFont(weight="bold"))
+        self.spacing_label = ctk.CTkLabel(grid, text="Spacing: -- mm", font=ctk.CTkFont(weight="bold"))
         self.spacing_label.grid(row=1, column=0, sticky="w", pady=4)
-        
-        self.dimensions_label = ctk.CTkLabel(grid_frame, text="Patch Dimensions: -- x -- mm", font=ctk.CTkFont(weight="bold"))
+        self.dimensions_label = ctk.CTkLabel(grid, text="Patch Dimensions: -- x -- mm", font=ctk.CTkFont(weight="bold"))
         self.dimensions_label.grid(row=1, column=1, sticky="w", pady=4)
-        
-        self.lambda_label = ctk.CTkLabel(grid_frame, text="Guided Wavelength: -- mm", font=ctk.CTkFont(weight="bold"))
+        self.lambda_label = ctk.CTkLabel(grid, text="Guided Wavelength: -- mm", font=ctk.CTkFont(weight="bold"))
         self.lambda_label.grid(row=2, column=0, sticky="w", pady=4)
-        
-        self.feed_offset_label = ctk.CTkLabel(grid_frame, text="Feed Offset (y): -- mm", font=ctk.CTkFont(weight="bold"))
+        self.feed_offset_label = ctk.CTkLabel(grid, text="Feed Offset (y): -- mm", font=ctk.CTkFont(weight="bold"))
         self.feed_offset_label.grid(row=2, column=1, sticky="w", pady=4)
-        
-        self.substrate_dims_label = ctk.CTkLabel(
-            grid_frame, 
-            text="Substrate Dimensions: -- x -- mm",
-            font=ctk.CTkFont(weight="bold")
-        )
+        self.substrate_dims_label = ctk.CTkLabel(grid, text="Substrate Dimensions: -- x -- mm",
+                                                 font=ctk.CTkFont(weight="bold"))
         self.substrate_dims_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
 
-        # Buttons
-        btn_frame = ctk.CTkFrame(sec_calc)
-        btn_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=12)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Calculate Parameters", 
-            command=self.calculate_parameters,
-            fg_color="#2E8B57", 
-            hover_color="#3CB371", 
-            width=180
-        ).pack(side="left", padx=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Save Parameters", 
-            command=self.save_parameters,
-            fg_color="#4169E1", 
-            hover_color="#6495ED", 
-            width=140
-        ).pack(side="left", padx=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Load Parameters", 
-            command=self.load_parameters,
-            fg_color="#FF8C00", 
-            hover_color="#FFA500", 
-            width=140
-        ).pack(side="left", padx=8)
-
-    def create_tooltip(self, widget, text):
-        """Create a tooltip for a widget"""
-        def enter(event):
-            tooltip = ctk.CTkToplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            label = ctk.CTkLabel(tooltip, text=text, 
-                                font=ctk.CTkFont(size=12),
-                                fg_color=("gray90", "gray20"),
-                                corner_radius=6)
-            label.pack()
-            widget.tooltip = tooltip
-            
-        def leave(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
-                
-        widget.bind("<Enter>", enter)
-        widget.bind("<Leave>", leave)
+        btns = ctk.CTkFrame(sec_calc); btns.grid(row=3, column=0, sticky="ew", padx=15, pady=12)
+        ctk.CTkButton(btns, text="Calculate Parameters", command=self.calculate_parameters,
+                      fg_color="#2E8B57", hover_color="#3CB371", width=180).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="Save Parameters", command=self.save_parameters,
+                      fg_color="#4169E1", hover_color="#6495ED", width=140).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="Load Parameters", command=self.load_parameters,
+                      fg_color="#FF8C00", hover_color="#FFA500", width=140).pack(side="left", padx=8)
 
     def setup_simulation_tab(self):
+        """Aba com botões de execução/parada e barra de progresso."""
         tab = self.tabview.tab("Simulation")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-
         main = ctk.CTkFrame(tab)
         main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            main, 
-            text="Simulation Control", 
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).pack(pady=10)
-
-        # Button row
-        btn_row = ctk.CTkFrame(main)
-        btn_row.pack(pady=14)
-        
-        self.run_button = ctk.CTkButton(
-            btn_row, 
-            text="Run Simulation", 
-            command=self.start_simulation_thread,
-            fg_color="#2E8B57", 
-            hover_color="#3CB371", 
-            height=40, 
-            width=160
-        )
+        ctk.CTkLabel(main, text="Simulation Control", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=10)
+        row = ctk.CTkFrame(main); row.pack(pady=14)
+        self.run_button = ctk.CTkButton(row, text="Run Simulation", command=self.start_simulation_thread,
+                                        fg_color="#2E8B57", hover_color="#3CB371", height=40, width=160)
         self.run_button.pack(side="left", padx=8)
-        
-        self.stop_button = ctk.CTkButton(
-            btn_row, 
-            text="Stop Simulation", 
-            command=self.stop_simulation_thread,
-            fg_color="#DC143C", 
-            hover_color="#FF4500",
-            state="disabled", 
-            height=40, 
-            width=160
-        )
+        self.stop_button = ctk.CTkButton(row, text="Stop Simulation", command=self.stop_simulation_thread,
+                                         fg_color="#DC143C", hover_color="#FF4500",
+                                         state="disabled", height=40, width=160)
         self.stop_button.pack(side="left", padx=8)
-
-        # Progress bar
-        progress_frame = ctk.CTkFrame(main)
-        progress_frame.pack(fill="x", padx=50, pady=8)
-        
-        ctk.CTkLabel(
-            progress_frame, 
-            text="Simulation Progress:", 
-            font=ctk.CTkFont(weight="bold")
-        ).pack(anchor="w")
-        
-        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=18)
-        self.progress_bar.pack(fill="x", pady=6)
-        self.progress_bar.set(0)
-
-        # Status label
-        self.sim_status_label = ctk.CTkLabel(
-            main, 
-            text="Simulation not started",
-            font=ctk.CTkFont(weight="bold")
-        )
+        bar = ctk.CTkFrame(main); bar.pack(fill="x", padx=50, pady=8)
+        ctk.CTkLabel(bar, text="Simulation Progress:", font=ctk.CTkFont(weight="bold")).pack(anchor="w")
+        self.progress_bar = ctk.CTkProgressBar(bar, height=18); self.progress_bar.pack(fill="x", pady=6); self.progress_bar.set(0)
+        self.sim_status_label = ctk.CTkLabel(main, text="Simulation not started", font=ctk.CTkFont(weight="bold"))
         self.sim_status_label.pack(pady=8)
-
-        # Note
-        note = ctk.CTkFrame(main, fg_color=("gray90", "gray15"))
-        note.pack(fill="x", padx=20, pady=10)
-        
-        ctk.CTkLabel(
-            note, 
-            text="Note: Simulation time increases with array size.",
-            font=ctk.CTkFont(size=12, slant="italic"),
-            text_color=("gray40", "gray60")
-        ).pack(padx=10, pady=10)
+        note = ctk.CTkFrame(main, fg_color=("gray90", "gray15")); note.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(note, text="Tip: With post vars (p_i / ph_i) you can retune beams without re-solving.",
+                     font=ctk.CTkFont(size=12, slant="italic"), text_color=("gray40", "gray60")).pack(padx=10, pady=10)
 
     def setup_results_tab(self):
+        """Aba de resultados com 5 painéis de gráficos + controles."""
         tab = self.tabview.tab("Results")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        # Create a paned window for splitting the results area
-        paned_window = ctk.CTkFrame(tab)
-        paned_window.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        paned_window.grid_columnconfigure(0, weight=1)
-        paned_window.grid_rowconfigure(1, weight=1)
+        main = ctk.CTkFrame(tab)
+        main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
 
-        # Title
-        ctk.CTkLabel(
-            paned_window, 
-            text="Simulation Results", 
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).grid(row=0, column=0, pady=10)
+        ctk.CTkLabel(main, text="Results & Beamforming", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, pady=10)
 
-        # Create notebook for different result types
-        self.results_notebook = ttk.Notebook(paned_window)
-        self.results_notebook.grid(row=1, column=0, sticky="nsew", pady=10)
-        
-        # Impedance Results Tab
-        impedance_frame = ctk.CTkFrame(self.results_notebook, fg_color=("gray92", "gray18"))
-        impedance_frame.grid_columnconfigure(0, weight=1)
-        impedance_frame.grid_rowconfigure(1, weight=1)
-        self.results_notebook.add(impedance_frame, text="Impedance Parameters")
-        
-        # Radiation Results Tab
-        radiation_frame = ctk.CTkFrame(self.results_notebook, fg_color=("gray92", "gray18"))
-        radiation_frame.grid_columnconfigure(0, weight=1)
-        radiation_frame.grid_rowconfigure(1, weight=1)
-        self.results_notebook.add(radiation_frame, text="Radiation Patterns")
-        
-        # Setup impedance tab
-        self.setup_impedance_tab(impedance_frame)
-        
-        # Setup radiation tab
-        self.setup_radiation_tab(radiation_frame)
-        
-        # Export buttons
-        export_frame = ctk.CTkFrame(paned_window)
-        export_frame.grid(row=2, column=0, pady=8)
-        
-        ctk.CTkButton(
-            export_frame, 
-            text="Export CSV", 
-            command=self.export_csv,
-            fg_color="#6A5ACD", 
-            hover_color="#7B68EE"
-        ).pack(side="left", padx=8)
-        
-        ctk.CTkButton(
-            export_frame, 
-            text="Export PNG", 
-            command=self.export_png,
-            fg_color="#20B2AA", 
-            hover_color="#40E0D0"
-        ).pack(side="left", padx=8)
-        
-        # Add optimize button
-        ctk.CTkButton(
-            export_frame, 
-            text="Analyze & Optimize", 
-            command=self.analyze_and_optimize,
-            fg_color="#FF6347", 
-            hover_color="#FF4500"
-        ).pack(side="left", padx=8)
-        
-        # Add reset button
-        ctk.CTkButton(
-            export_frame, 
-            text="Reset to Original", 
-            command=self.reset_to_original,
-            fg_color="#9370DB", 
-            hover_color="#8A2BE2"
-        ).pack(side="left", padx=8)
+        # Área de gráficos com GridSpec 3x2
+        graph_frame = ctk.CTkFrame(main)
+        graph_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        graph_frame.grid_columnconfigure(0, weight=1)
+        graph_frame.grid_rowconfigure(0, weight=1)
 
-    def setup_impedance_tab(self, parent):
-        """Setup the impedance parameters tab"""
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(0, weight=1)
-        
-        # Create figure for impedance results
-        self.fig_imp = plt.figure(figsize=(10, 8))
+        self.fig = plt.figure(figsize=(12, 10))
         face = '#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF'
-        self.fig_imp.patch.set_facecolor(face)
-        
-        # Create subplots for S11, VSWR, and impedance
-        self.ax_s11 = self.fig_imp.add_subplot(3, 1, 1)
-        self.ax_vswr = self.fig_imp.add_subplot(3, 1, 2)
-        self.ax_z = self.fig_imp.add_subplot(3, 1, 3)
-        
-        # Style the axes
-        for ax in [self.ax_s11, self.ax_vswr, self.ax_z]:
+        self.fig.patch.set_facecolor(face)
+        gs = self.fig.add_gridspec(3, 2, height_ratios=[1, 1, 1.3])
+
+        self.ax_s11 = self.fig.add_subplot(gs[0, 0])
+        self.ax_imp = self.fig.add_subplot(gs[0, 1])
+        self.ax_th = self.fig.add_subplot(gs[1, 0])
+        self.ax_ph = self.fig.add_subplot(gs[1, 1])
+        self.ax_3d = self.fig.add_subplot(gs[2, :], projection='3d')
+
+        for ax in (self.ax_s11, self.ax_imp, self.ax_th, self.ax_ph):
             ax.set_facecolor(face)
             if ctk.get_appearance_mode() == "Dark":
                 ax.tick_params(colors='white')
-                ax.xaxis.label.set_color('white')
-                ax.yaxis.label.set_color('white')
-                ax.title.set_color('white')
-                for s in ['bottom', 'top', 'right', 'left']:
-                    ax.spines[s].set_color('white')
+                ax.xaxis.label.set_color('white'); ax.yaxis.label.set_color('white'); ax.title.set_color('white')
+                for s in ['bottom', 'top', 'right', 'left']: ax.spines[s].set_color('white')
                 ax.grid(color='gray', alpha=0.5)
-        
-        # Set titles and labels
-        self.ax_s11.set_title("S11 Parameter")
-        self.ax_s11.set_ylabel("S11 (dB)")
-        
-        self.ax_vswr.set_title("VSWR")
-        self.ax_vswr.set_ylabel("VSWR")
-        
-        self.ax_z.set_title("Input Impedance")
-        self.ax_z.set_xlabel("Frequency (GHz)")
-        self.ax_z.set_ylabel("Impedance (Ω)")
-        
-        # Embed the plot in the GUI
-        canvas_frame = ctk.CTkFrame(parent)
-        canvas_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        canvas_frame.grid_columnconfigure(0, weight=1)
-        canvas_frame.grid_rowconfigure(0, weight=1)
-        
-        self.canvas_imp = FigureCanvasTkAgg(self.fig_imp, master=canvas_frame)
-        self.canvas_imp.get_tk_widget().pack(fill="both", expand=True)
-        
-        # Add controls for impedance chart
-        control_frame = ctk.CTkFrame(parent)
-        control_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        
-        ctk.CTkLabel(control_frame, text="Chart Controls:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=5)
-        
-        # Add frequency range controls
-        ctk.CTkLabel(control_frame, text="Freq Range:").pack(side="left", padx=5)
-        self.freq_min = ctk.CTkEntry(control_frame, width=80)
-        self.freq_min.insert(0, str(self.params["sweep_start"]))
-        self.freq_min.pack(side="left", padx=2)
-        
-        ctk.CTkLabel(control_frame, text="to").pack(side="left", padx=2)
-        
-        self.freq_max = ctk.CTkEntry(control_frame, width=80)
-        self.freq_max.insert(0, str(self.params["sweep_stop"]))
-        self.freq_max.pack(side="left", padx=2)
-        
-        ctk.CTkLabel(control_frame, text="GHz").pack(side="left", padx=2)
-        
-        ctk.CTkButton(control_frame, text="Update Charts", command=self.update_impedance_charts, 
-                     width=120).pack(side="left", padx=10)
+        self.ax_3d.set_facecolor(face)
 
-    def setup_radiation_tab(self, parent):
-        """Setup the radiation patterns tab"""
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(0, weight=1)
-        
-        # Create figure for radiation patterns
-        self.fig_rad = plt.figure(figsize=(12, 8))
-        face = '#2B2B2B' if ctk.get_appearance_mode() == "Dark" else '#FFFFFF'
-        self.fig_rad.patch.set_facecolor(face)
-        
-        # Create subplots for different radiation patterns
-        self.ax_2d = self.fig_rad.add_subplot(2, 2, 1, polar=True)
-        self.ax_eplane = self.fig_rad.add_subplot(2, 2, 2)
-        self.ax_hplane = self.fig_rad.add_subplot(2, 2, 3)
-        self.ax_3d = self.fig_rad.add_subplot(2, 2, 4, projection='3d')
-        
-        # Style the axes - only for Cartesian axes, not polar or 3D
-        for ax in [self.ax_eplane, self.ax_hplane]:
-            ax.set_facecolor(face)
-            if ctk.get_appearance_mode() == "Dark":
-                ax.tick_params(colors='white')
-                ax.xaxis.label.set_color('white')
-                ax.yaxis.label.set_color('white')
-                ax.title.set_color('white')
-                for s in ['bottom', 'top', 'right', 'left']:
-                    ax.spines[s].set_color('white')
-                ax.grid(color='gray', alpha=0.5)
-        
-        # Style polar plot separately
-        if ctk.get_appearance_mode() == "Dark":
-            self.ax_2d.tick_params(colors='white')
-            self.ax_2d.title.set_color('white')
-            self.ax_2d.grid(color='gray', alpha=0.5)
-        
-        # Style 3D plot separately
-        if ctk.get_appearance_mode() == "Dark":
-            self.ax_3d.tick_params(colors='white')
-            self.ax_3d.xaxis.label.set_color('white')
-            self.ax_3d.yaxis.label.set_color('white')
-            self.ax_3d.zaxis.label.set_color('white')
-            self.ax_3d.title.set_color('white')
-        
-        # Set titles
-        self.ax_2d.set_title("2D Radiation Pattern (Polar)")
-        self.ax_eplane.set_title("E-Plane Cut (YZ Plane)")
-        self.ax_eplane.set_xlabel("Angle (degrees)")
-        self.ax_eplane.set_ylabel("Gain (dBi)")
-        self.ax_hplane.set_title("H-Plane Cut (XY Plane)")
-        self.ax_hplane.set_xlabel("Angle (degrees)")
-        self.ax_hplane.set_ylabel("Gain (dBi)")
-        self.ax_3d.set_title("3D Radiation Pattern")
-        
-        # Embed the plot in the GUI
-        canvas_frame = ctk.CTkFrame(parent)
-        canvas_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        canvas_frame.grid_columnconfigure(0, weight=1)
-        canvas_frame.grid_rowconfigure(0, weight=1)
-        
-        self.canvas_rad = FigureCanvasTkAgg(self.fig_rad, master=canvas_frame)
-        self.canvas_rad.get_tk_widget().pack(fill="both", expand=True)
-        
-        # Add controls for radiation charts
-        control_frame = ctk.CTkFrame(parent)
-        control_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        
-        ctk.CTkLabel(control_frame, text="Radiation Controls:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=5)
-        
-        # Frequency selection
-        ctk.CTkLabel(control_frame, text="Frequency:").pack(side="left", padx=5)
-        self.rad_freq = ctk.CTkEntry(control_frame, width=80)
-        self.rad_freq.insert(0, str(self.params["frequency"]))
-        self.rad_freq.pack(side="left", padx=2)
-        ctk.CTkLabel(control_frame, text="GHz").pack(side="left", padx=2)
-        
-        ctk.CTkButton(control_frame, text="Update Patterns", command=self.update_radiation_patterns, 
-                    width=120).pack(side="left", padx=10)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # Painel de beamforming / refresh
+        panel = ctk.CTkFrame(main)
+        panel.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        panel.grid_columnconfigure(0, weight=1)
+        self.src_frame = ctk.CTkFrame(panel); self.src_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=(8, 2))
+        self.source_controls: Dict[str, Dict[str, ctk.CTkBaseClass]] = {}
+        self.auto_refresh_var = ctk.BooleanVar(value=False)
+
+        ctrl = ctk.CTkFrame(panel); ctrl.grid(row=1, column=0, pady=6)
+        ctk.CTkButton(ctrl, text="Analyze S11", command=self.analyze_and_mark_s11,
+                      fg_color="#6A5ACD", hover_color="#7B68EE").pack(side="left", padx=8)
+        ctk.CTkButton(ctrl, text="Apply Sources", command=self.apply_sources_from_ui,
+                      fg_color="#20B2AA", hover_color="#40E0D0").pack(side="left", padx=8)
+        ctk.CTkButton(ctrl, text="Refresh Patterns", command=self.refresh_patterns_only,
+                      fg_color="#FF8C00", hover_color="#FFA500").pack(side="left", padx=8)
+        ctk.CTkCheckBox(ctrl, text="Auto-refresh (1.5s)", variable=self.auto_refresh_var,
+                        command=self.toggle_auto_refresh).pack(side="left", padx=8)
+        ctk.CTkButton(ctrl, text="Export PNG", command=self.export_png,
+                      fg_color="#20B2AA", hover_color="#40E0D0").pack(side="left", padx=8)
+        ctk.CTkButton(ctrl, text="Export CSV (S11)", command=self.export_csv,
+                      fg_color="#6A5ACD", hover_color="#7B68EE").pack(side="left", padx=8)
+
+        self.result_label = ctk.CTkLabel(main, text="", font=ctk.CTkFont(weight="bold"))
+        self.result_label.grid(row=3, column=0, pady=(6, 2))
 
     def setup_log_tab(self):
+        """Aba de log com *textbox* e botões de limpar/salvar."""
         tab = self.tabview.tab("Log")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-
         main = ctk.CTkFrame(tab)
         main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            main, 
-            text="Simulation Log", 
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).grid(row=0, column=0, pady=10)
-
-        # Log text area
-        self.log_text = ctk.CTkTextbox(
-            main, 
-            width=900, 
-            height=500, 
-            font=ctk.CTkFont(family="Consolas")
-        )
+        ctk.CTkLabel(main, text="Simulation Log", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, pady=10)
+        self.log_text = ctk.CTkTextbox(main, width=900, height=500, font=ctk.CTkFont(family="Consolas"))
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         self.log_text.insert("1.0", "Log started at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        btn = ctk.CTkFrame(main); btn.grid(row=2, column=0, pady=8)
+        ctk.CTkButton(btn, text="Clear Log", command=self.clear_log).pack(side="left", padx=8)
+        ctk.CTkButton(btn, text="Save Log", command=self.save_log).pack(side="left", padx=8)
 
-        # Log buttons
-        btn_frame = ctk.CTkFrame(main)
-        btn_frame.grid(row=2, column=0, pady=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Clear Log", 
-            command=self.clear_log
-        ).pack(side="left", padx=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Save Log", 
-            command=self.save_log
-        ).pack(side="left", padx=8)
-
-    def setup_parameters_summary_tab(self):
-        tab = self.tabview.tab("Parameters Summary")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-
-        main = ctk.CTkFrame(tab)
-        main.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        main.grid_columnconfigure(0, weight=1)
-        main.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            main, 
-            text="Antenna Parameters Summary", 
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).grid(row=0, column=0, pady=10)
-
-        # Create a frame for the parameter treeview
-        tree_frame = ctk.CTkFrame(main)
-        tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        tree_frame.grid_rowconfigure(0, weight=1)
-
-        # Create a treeview to display parameters
-        self.param_tree = ttk.Treeview(tree_frame, columns=("Value", "Unit"), show="tree", height=20)
-        self.param_tree.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-
-        # Add scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.param_tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.param_tree.configure(yscrollcommand=scrollbar.set)
-
-        # Configure treeview style
-        style = ttk.Style()
-        style.configure("Treeview", 
-                        background="#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#ffffff",
-                        fieldbackground="#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#ffffff",
-                        foreground="white" if ctk.get_appearance_mode() == "Dark" else "black")
-        
-        style.configure("Treeview.Heading", 
-                        background="#3b3b3b" if ctk.get_appearance_mode() == "Dark" else "#e0e0e0",
-                        foreground="white" if ctk.get_appearance_mode() == "Dark" else "black")
-
-        # Set column headings
-        self.param_tree.heading("#0", text="Parameter")
-        self.param_tree.heading("Value", text="Value")
-        self.param_tree.heading("Unit", text="Unit")
-
-        # Set column widths
-        self.param_tree.column("#0", width=250, minwidth=200)
-        self.param_tree.column("Value", width=150, minwidth=100)
-        self.param_tree.column("Unit", width=80, minwidth=60)
-
-        # Populate the treeview with parameters
-        self.update_parameters_summary()
-
-        # Button to refresh the summary
-        btn_frame = ctk.CTkFrame(main)
-        btn_frame.grid(row=2, column=0, pady=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Refresh Summary", 
-            command=self.update_parameters_summary
-        ).pack(side="left", padx=8)
-        
-        ctk.CTkButton(
-            btn_frame, 
-            text="Export to CSV", 
-            command=self.export_parameters_csv
-        ).pack(side="left", padx=8)
-
-    def update_parameters_summary(self):
-        """Update the parameters summary treeview"""
-        # Clear existing items
-        for item in self.param_tree.get_children():
-            self.param_tree.delete(item)
-        
-        # Add user parameters
-        user_params = self.param_tree.insert("", "end", text="User Parameters", values=("", ""))
-        
-        for key, value in self.params.items():
-            if key not in ["non_graphical", "aedt_version"]:  # Skip some parameters
-                unit = self.get_parameter_unit(key)
-                self.param_tree.insert(user_params, "end", text=key.replace("_", " ").title(), 
-                                      values=(f"{value}", unit))
-        
-        # Add calculated parameters
-        calc_params = self.param_tree.insert("", "end", text="Calculated Parameters", values=("", ""))
-        
-        for key, value in self.calculated_params.items():
-            unit = self.get_parameter_unit(key)
-            self.param_tree.insert(calc_params, "end", text=key.replace("_", " ").title(), 
-                                  values=(f"{value:.4f}" if isinstance(value, float) else f"{value}", unit))
-        
-        # Expand all items
-        self.param_tree.item(user_params, open=True)
-        self.param_tree.item(calc_params, open=True)
-
-    def get_parameter_unit(self, param_name):
-        """Get the unit for a parameter"""
-        units = {
-            "frequency": "GHz",
-            "gain": "dBi",
-            "sweep_start": "GHz",
-            "sweep_stop": "GHz",
-            "substrate_thickness": "mm",
-            "metal_thickness": "mm",
-            "er": "",
-            "tan_d": "",
-            "probe_radius": "mm",
-            "coax_wall_thickness": "mm",
-            "coax_port_length": "mm",
-            "antipad_clearance": "mm",
-            "sweep_step": "GHz",
-            "patch_length": "mm",
-            "patch_width": "mm",
-            "spacing": "mm",
-            "lambda_g": "mm",
-            "feed_offset": "mm",
-            "substrate_width": "mm",
-            "substrate_length": "mm",
-            "num_patches": "",
-            "rows": "",
-            "cols": ""
-        }
-        
-        return units.get(param_name, "")
-
-    def export_parameters_csv(self):
-        """Export parameters to CSV file"""
-        try:
-            with open("antenna_parameters_summary.csv", "w") as f:
-                f.write("Category,Parameter,Value,Unit\n")
-                
-                # Write user parameters
-                for key, value in self.params.items():
-                    if key not in ["non_graphical", "aedt_version"]:
-                        unit = self.get_parameter_unit(key)
-                        f.write(f"User,{key},{value},{unit}\n")
-                
-                # Write calculated parameters
-                for key, value in self.calculated_params.items():
-                    unit = self.get_parameter_unit(key)
-                    f.write(f"Calculated,{key},{value},{unit}\n")
-            
-            self.log_message("Parameters summary exported to antenna_parameters_summary.csv")
-            messagebox.showinfo("Export Successful", "Parameters summary exported to CSV file.")
-            
-        except Exception as e:
-            self.log_message(f"Error exporting parameters to CSV: {e}")
-            messagebox.showerror("Export Error", f"Failed to export parameters: {e}")
-
-    def update_impedance_charts(self):
-        """Update impedance charts with new frequency range"""
-        try:
-            # Get new frequency range
-            freq_min = float(self.freq_min.get())
-            freq_max = float(self.freq_max.get())
-            
-            # Update sweep parameters
-            self.params["sweep_start"] = freq_min
-            self.params["sweep_stop"] = freq_max
-            
-            # Re-run simulation or update charts if data is available
-            if self.simulation_data is not None:
-                self.plot_impedance_results()
-                
-        except ValueError:
-            messagebox.showerror("Input Error", "Please enter valid numeric values for frequency range.")
-        except Exception as e:
-            self.log_message(f"Error updating impedance charts: {e}")
-
-    def update_radiation_patterns(self):
-        """Update radiation patterns with new frequency"""
-        try:
-            # Get new frequency
-            freq = float(self.rad_freq.get())
-            
-            # Update plots if data is available
-            if hasattr(self, 'original_theta_data') and hasattr(self, 'original_phi_data'):
-                self.plot_radiation_patterns(freq)
-                
-        except ValueError:
-            messagebox.showerror("Input Error", "Please enter a valid numeric value for frequency.")
-        except Exception as e:
-            self.log_message(f"Error updating radiation patterns: {e}")
-
-    def plot_impedance_results(self):
-        """Plot impedance results (S11, VSWR, impedance)"""
-        try:
-            # Clear previous plots
-            self.ax_s11.clear()
-            self.ax_vswr.clear()
-            self.ax_z.clear()
-            
-            # Plot S11
-            if self.simulation_data is not None:
-                freqs = self.simulation_data[:, 0]
-                s11 = self.simulation_data[:, 1]
-                
-                self.ax_s11.plot(freqs, s11, 'b-', linewidth=2, label='S11')
-                self.ax_s11.axhline(y=-10, color='r', linestyle='--', alpha=0.7, label='-10 dB')
-                self.ax_s11.set_xlabel("Frequency (GHz)")
-                self.ax_s11.set_ylabel("S11 (dB)")
-                self.ax_s11.set_title("S11 Parameter")
-                self.ax_s11.legend()
-                self.ax_s11.grid(True, alpha=0.5)
-                
-                # Mark center frequency
-                cf = float(self.params["frequency"])
-                self.ax_s11.axvline(x=cf, color='g', linestyle='--', alpha=0.7)
-                self.ax_s11.text(cf, self.ax_s11.get_ylim()[1]*0.9, f'{cf} GHz', color='g')
-                
-                # Calculate and plot VSWR
-                vswr = (1 + 10**(s11/20)) / (1 - 10**(s11/20))
-                self.ax_vswr.plot(freqs, vswr, 'g-', linewidth=2, label='VSWR')
-                self.ax_vswr.axhline(y=2, color='r', linestyle='--', alpha=0.7, label='VSWR=2')
-                self.ax_vswr.set_xlabel("Frequency (GHz)")
-                self.ax_vswr.set_ylabel("VSWR")
-                self.ax_vswr.set_title("Voltage Standing Wave Ratio")
-                self.ax_vswr.legend()
-                self.ax_vswr.grid(True, alpha=0.5)
-                self.ax_vswr.axvline(x=cf, color='g', linestyle='--', alpha=0.7)
-            
-            # Update canvas
-            self.fig_imp.tight_layout()
-            self.canvas_imp.draw()
-            
-        except Exception as e:
-            self.log_message(f"Error plotting impedance results: {e}")
-
-    def plot_radiation_patterns(self, frequency):
-        """Plot radiation patterns at specified frequency"""
-        try:
-            # Clear previous plots
-            self.ax_2d.clear()
-            self.ax_eplane.clear()
-            self.ax_hplane.clear()
-            self.ax_3d.clear()
-            
-            # Get radiation pattern data for E-plane (YZ plane, phi=0°)
-            eplane_theta, eplane_gain = self._get_gain_cut(frequency, cut="theta", fixed_angle_deg=0.0)
-            
-            # Get radiation pattern data for H-plane (XY plane, theta=90°)
-            hplane_phi, hplane_gain = self._get_gain_cut(frequency, cut="phi", fixed_angle_deg=90.0)
-            
-            if eplane_theta is not None and eplane_gain is not None:
-                # Convert to radians for polar plot
-                theta_rad = np.radians(eplane_theta)
-                
-                # Plot 2D radiation pattern (polar)
-                self.ax_2d.plot(theta_rad, eplane_gain, 'b-', linewidth=2)
-                self.ax_2d.set_title("2D Radiation Pattern (Polar)")
-                self.ax_2d.grid(True)
-                
-                # Plot E-plane cut (YZ plane)
-                self.ax_eplane.plot(eplane_theta, eplane_gain, 'b-', linewidth=2, label='E-plane (YZ)')
-                self.ax_eplane.set_xlabel("Angle (degrees)")
-                self.ax_eplane.set_ylabel("Gain (dBi)")
-                self.ax_eplane.set_title("E-Plane Cut (YZ Plane)")
-                self.ax_eplane.legend()
-                self.ax_eplane.grid(True, alpha=0.5)
-            
-            if hplane_phi is not None and hplane_gain is not None:
-                # Plot H-plane cut (XY plane)
-                self.ax_hplane.plot(hplane_phi, hplane_gain, 'r-', linewidth=2, label='H-plane (XY)')
-                self.ax_hplane.set_xlabel("Angle (degrees)")
-                self.ax_hplane.set_ylabel("Gain (dBi)")
-                self.ax_hplane.set_title("H-Plane Cut (XY Plane)")
-                self.ax_hplane.legend()
-                self.ax_hplane.grid(True, alpha=0.5)
-            
-            # Create a 3D radiation pattern visualization
-            # This is a simplified representation using the available data
-            if eplane_theta is not None and eplane_gain is not None and hplane_phi is not None and hplane_gain is not None:
-                # Create a meshgrid for 3D plotting
-                theta = np.linspace(0, 2*np.pi, 36)
-                phi = np.linspace(0, np.pi, 18)
-                theta, phi = np.meshgrid(theta, phi)
-                
-                # Interpolate gain values to create a 3D pattern
-                # This is a simplified approximation
-                max_gain = max(np.max(eplane_gain) if eplane_gain is not None else 0, 
-                              np.max(hplane_gain) if hplane_gain is not None else 0)
-                
-                # Create a radiation pattern shape based on the E and H plane patterns
-                r = 5 * (1 + 0.5 * np.sin(phi) * np.cos(2*theta))  # Example pattern shape
-                
-                # Scale by gain (simplified)
-                r = r * (max_gain / 10 if max_gain > 0 else 1)
-                
-                # Convert to Cartesian coordinates
-                x = r * np.sin(phi) * np.cos(theta)
-                y = r * np.sin(phi) * np.sin(theta)
-                z = r * np.cos(phi)
-                
-                # Plot 3D radiation pattern
-                self.ax_3d.plot_surface(x, y, z, cmap='viridis', alpha=0.8, edgecolor='none')
-                self.ax_3d.set_title("3D Radiation Pattern")
-                self.ax_3d.set_xlabel("X")
-                self.ax_3d.set_ylabel("Y")
-                self.ax_3d.set_zlabel("Z")
-            
-            # Update canvas
-            self.fig_rad.tight_layout()
-            self.canvas_rad.draw()
-            
-        except Exception as e:
-            self.log_message(f"Error plotting radiation patterns: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
-
-    # ------------- Log utilities -------------
-    def log_message(self, message):
+    # ------------- Utilidades de Log -------------
+    def log_message(self, message: str):
+        """Enfileira uma mensagem para o textbox de log com carimbo de hora."""
         self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
 
     def process_log_queue(self):
+        """Consumidor assíncrono da fila de log; mantém UI responsiva."""
         try:
             while True:
                 msg = self.log_queue.get_nowait()
@@ -1044,37 +414,41 @@ class ModernPatchAntennaDesigner:
         except Exception as e:
             self.log_message(f"Error saving log: {e}")
 
-    def export_csv(self):
-        try:
-            if hasattr(self, 'simulation_data') and self.simulation_data is not None:
-                np.savetxt(
-                    "simulation_results.csv", 
-                    self.simulation_data, 
-                    delimiter=",",
-                    header="Frequency (GHz), S11 (dB)", 
-                    comments=''
-                )
-                self.log_message("Data exported to simulation_results.csv")
-            else:
-                self.log_message("No simulation data available for export")
-        except Exception as e:
-            self.log_message(f"Error exporting CSV: {e}")
+    # ----------- Física / Cálculos -----------
+    def _validate_ranges(self) -> bool:
+        """Valida faixas de parâmetros mais críticas. Atualiza status/log e retorna True/False."""
+        ok = True
+        msgs = []
+        if self.params["frequency"] <= 0:
+            ok = False; msgs.append("frequency must be > 0")
+        if self.params["sweep_start"] <= 0 or self.params["sweep_stop"] <= 0:
+            ok = False; msgs.append("sweep_start/stop must be > 0")
+        if self.params["sweep_start"] >= self.params["sweep_stop"]:
+            ok = False; msgs.append("sweep_start must be < sweep_stop")
+        if self.params["er"] < 1:
+            ok = False; msgs.append("er must be >= 1")
+        if self.params["substrate_thickness"] <= 0:
+            ok = False; msgs.append("substrate_thickness must be > 0")
+        if not (0.0 <= self.params["feed_rel_x"] <= 1.0):
+            ok = False; msgs.append("feed_rel_x must be in [0,1]")
+        if self.params["probe_radius"] <= 0:
+            ok = False; msgs.append("probe_radius must be > 0")
+        if self.params["coax_ba_ratio"] <= 1.05:
+            ok = False; msgs.append("coax_ba_ratio must be > 1.05")
+        if self.params["coax_port_length"] <= 0:
+            ok = False; msgs.append("coax_port_length must be > 0")
+        if self.params["theta_step"] <= 0 or self.params["phi_step"] <= 0:
+            ok = False; msgs.append("theta_step/phi_step must be > 0")
+        if not ok:
+            msg = "; ".join(msgs)
+            self.status_label.configure(text=f"Invalid parameters: {msg}")
+            self.log_message(f"Invalid parameters: {msg}")
+        return ok
 
-    def export_png(self):
-        try:
-            if hasattr(self, 'fig_imp'):
-                self.fig_imp.savefig("impedance_results.png", dpi=300, bbox_inches='tight')
-                self.log_message("Impedance plot saved to impedance_results.png")
-            
-            if hasattr(self, 'fig_rad'):
-                self.fig_rad.savefig("radiation_patterns.png", dpi=300, bbox_inches='tight')
-                self.log_message("Radiation plot saved to radiation_patterns.png")
-                
-        except Exception as e:
-            self.log_message(f"Error saving plot: {e}")
-
-    # ----------- Physics / calculations -----------
-    def get_parameters(self):
+    def get_parameters(self) -> bool:
+        """Lê valores da UI, faz *casting* e sincroniza `self.params`.
+        Retorna False se algum valor for inválido.
+        """
         self.log_message("Getting parameters from interface")
         for key, widget in self.entries:
             try:
@@ -1087,7 +461,7 @@ class ModernPatchAntennaDesigner:
                 elif key in ["substrate_thickness", "metal_thickness", "er", "tan_d",
                              "probe_radius", "coax_ba_ratio", "coax_wall_thickness",
                              "coax_port_length", "antipad_clearance", "feed_rel_x",
-                             "sweep_step"]:
+                             "sweep_step", "theta_step", "phi_step"]:
                     if isinstance(widget, ctk.CTkEntry):
                         self.params[key] = float(widget.get())
                 elif key in ["spacing_type", "substrate_material", "feed_position", "sweep_type"]:
@@ -1101,287 +475,138 @@ class ModernPatchAntennaDesigner:
                 self.log_message(msg)
                 return False
         self.log_message("All parameters retrieved successfully")
-        return True
+        return self._validate_ranges()
 
     def calculate_patch_dimensions(self, frequency_ghz: float) -> Tuple[float, float, float]:
-        """Calculate patch dimensions using Balanis formulas for rectangular microstrip patches."""
+        """Calcula L, W e λg (em mm) para microfita retangular.
+
+        Fórmulas clássicas (Balanis / Hammerstad-Jensen) para *effective permittivity*
+        e *fringing* (ΔL).
+        """
         f = frequency_ghz * 1e9
         er = float(self.params["er"])
         h = float(self.params["substrate_thickness"]) / 1000.0  # mm->m
-        
-        # Width calculation
         W = self.c / (2 * f) * math.sqrt(2 / (er + 1))
-        
-        # Effective permittivity
         eeff = (er + 1) / 2 + (er - 1) / 2 * (1 + 12 * h / W) ** -0.5
-        
-        # Length extension due to fringing
         dL = 0.412 * h * ((eeff + 0.3) * (W / h + 0.264)) / ((eeff - 0.258) * (W / h + 0.8))
-        
-        # Effective length
         L_eff = self.c / (2 * f * math.sqrt(eeff))
-        
-        # Actual length
         L = L_eff - 2 * dL
-        
-        # Guided wavelength
         lambda_g = self.c / (f * math.sqrt(eeff))
-        
-        return (L * 1000.0, W * 1000.0, lambda_g * 1000.0)  # Convert to mm
+        return (L * 1000.0, W * 1000.0, lambda_g * 1000.0)
 
-    def _size_array_from_gain(self):
-        """Calculate array size based on desired gain."""
-        G_elem = 8.0  # dBi (typical gain for a single patch)
+    def _size_array_from_gain(self) -> Tuple[int, int, int]:
+        """Deriva nº de elementos (linhas/colunas) a partir do *gain* desejado.
+        Usa uma aproximação simples: G_total ≈ G_elem + 10*log10(N).
+        G_elem fixo (8 dBi) como heurística.
+        """
+        G_elem = 8.0
         G_des = float(self.params["gain"])
-        
-        # Calculate required number of elements
         N_req = max(1, int(math.ceil(10 ** ((G_des - G_elem) / 10.0))))
-        
-        # Ensure even number of elements
         if N_req % 2 == 1:
             N_req += 1
-            
-        # Calculate rows and columns
-        rows = max(2, int(round(math.sqrt(N_req))))
-        if rows % 2 == 1:
-            rows += 1
-            
-        cols = max(2, int(math.ceil(N_req / rows)))
-        if cols % 2 == 1:
-            cols += 1
-            
-        # Ensure we have enough elements
+        rows = max(2, int(round(math.sqrt(N_req))));  rows += rows % 2
+        cols = max(2, int(math.ceil(N_req / rows))); cols += cols % 2
         while rows * cols < N_req:
             if rows <= cols:
                 rows += 2
             else:
                 cols += 2
-                
         return rows, cols, N_req
 
     def calculate_substrate_size(self):
-        """Calculate substrate dimensions based on array configuration."""
+        """Define dimensões do substrato com *margin* de 20% do maior lado útil."""
         L = self.calculated_params["patch_length"]
         W = self.calculated_params["patch_width"]
         s = self.calculated_params["spacing"]
         r = self.calculated_params["rows"]
         c = self.calculated_params["cols"]
-        
         total_w = c * W + (c - 1) * s
         total_l = r * L + (r - 1) * s
-        
-        # Add margin (20% of the larger dimension)
         margin = max(total_w, total_l) * 0.20
-        
         self.calculated_params["substrate_width"] = total_w + 2 * margin
         self.calculated_params["substrate_length"] = total_l + 2 * margin
-        
-        self.log_message(
-            f"Substrate size calculated: {self.calculated_params['substrate_width']:.2f} x "
-            f"{self.calculated_params['substrate_length']:.2f} mm"
-        )
+        self.log_message(f"Substrate size calculated: {self.calculated_params['substrate_width']:.2f} x "
+                         f"{self.calculated_params['substrate_length']:.2f} mm")
 
     def calculate_parameters(self):
-        """Calculate all antenna parameters based on user inputs."""
+        """Calcula L/W/λg, *spacing* e *layout* (linhas/colunas). Atualiza UI."""
         self.log_message("Starting parameter calculation")
-        
         if not self.get_parameters():
             self.log_message("Parameter calculation failed due to invalid input")
             return
-            
         try:
-            # Calculate patch dimensions
             L_mm, W_mm, lambda_g_mm = self.calculate_patch_dimensions(self.params["frequency"])
-            self.calculated_params.update({
-                "patch_length": L_mm, 
-                "patch_width": W_mm, 
-                "lambda_g": lambda_g_mm
-            })
-            
-            # Calculate spacing
+            self.calculated_params.update({"patch_length": L_mm, "patch_width": W_mm, "lambda_g": lambda_g_mm})
             lambda0_m = self.c / (self.params["frequency"] * 1e9)
-            factors = {
-                "lambda/2": 0.5, 
-                "lambda": 1.0, 
-                "0.7*lambda": 0.7, 
-                "0.8*lambda": 0.8, 
-                "0.9*lambda": 0.9
-            }
-            
+            factors = {"lambda/2": 0.5, "lambda": 1.0, "0.7*lambda": 0.7, "0.8*lambda": 0.8, "0.9*lambda": 0.9}
             spacing_mm = factors.get(self.params["spacing_type"], 0.5) * lambda0_m * 1000.0
             self.calculated_params["spacing"] = spacing_mm
-            
-            # Calculate number of elements
             rows, cols, N_req = self._size_array_from_gain()
-            self.calculated_params.update({
-                "num_patches": rows * cols, 
-                "rows": rows, 
-                "cols": cols
-            })
-            
-            self.log_message(
-                f"Array sizing -> target gain {self.params['gain']} dBi, N_req≈{N_req}, "
-                f"layout {rows}x{cols} (= {rows*cols} patches)"
-            )
-            
-            # Calculate feed offset in y direction
+            self.calculated_params.update({"num_patches": rows * cols, "rows": rows, "cols": cols})
+            self.log_message(f"Array sizing -> target gain {self.params['gain']} dBi, N_req≈{N_req}, layout {rows}x{cols} (= {rows*cols} patches)")
             self.calculated_params["feed_offset"] = 0.30 * L_mm
-            
-            # Calculate substrate dimensions
             self.calculate_substrate_size()
-            
-            # Update UI with calculated values
+            # UI
             self.patches_label.configure(text=f"Number of Patches: {rows*cols}")
             self.rows_cols_label.configure(text=f"Configuration: {rows} x {cols}")
             self.spacing_label.configure(text=f"Spacing: {spacing_mm:.2f} mm ({self.params['spacing_type']})")
             self.dimensions_label.configure(text=f"Patch Dimensions: {L_mm:.2f} x {W_mm:.2f} mm")
             self.lambda_label.configure(text=f"Guided Wavelength: {lambda_g_mm:.2f} mm")
             self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
-            
             self.substrate_dims_label.configure(
                 text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x "
-                     f"{self.calculated_params['substrate_length']:.2f} mm"
-            )
-            
+                     f"{self.calculated_params['substrate_length']:.2f} mm")
             self.status_label.configure(text="Parameters calculated successfully")
             self.log_message("Parameters calculated successfully")
-            
         except Exception as e:
             self.status_label.configure(text=f"Error in calculation: {e}")
-            self.log_message(f"Error in calculation: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Error in calculation: {e}\nTraceback: {traceback.format_exc()}")
 
     # --------- AEDT helpers ---------
     def _ensure_material(self, name: str, er: float, tan_d: float):
-        """Ensure a material exists in the project, create it if not."""
+        """Garante a existência de um material com εr e tanδ informados."""
         try:
             if not self.hfss.materials.checkifmaterialexists(name):
                 self.hfss.materials.add_material(name)
                 m = self.hfss.materials.material_keys[name]
-                m.permittivity = er
-                m.dielectric_loss_tangent = tan_d
+                m.permittivity = er; m.dielectric_loss_tangent = tan_d
                 self.log_message(f"Created material: {name} (er={er}, tanδ={tan_d})")
         except Exception as e:
             self.log_message(f"Material management warning for '{name}': {e}")
 
     def _open_or_create_project(self):
-        """Open an existing project or create a new one."""
+        """Abre Desktop/Projeto temporário e cria design HFSS DrivenModal."""
         if self.desktop is None:
-            self.desktop = Desktop(
-                version=self.params["aedt_version"],
-                non_graphical=self.params["non_graphical"],
-                new_desktop=True
-            )
-
-        # Try to find existing project
-        od = getattr(self.desktop, "_odesktop", None) or getattr(self.desktop, "odesktop", None)
-        open_names, open_objs = [], []
-        
-        if od:
-            try:
-                for p in od.GetProjects():
-                    try:
-                        open_names.append(p.GetName())
-                        open_objs.append(p)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        # Use existing project if found
-        if self.project_display_name in open_names:
-            idx = open_names.index(self.project_display_name)
-            proj_obj = open_objs[idx]
-            new_design = self.design_base_name
-            
-            try:
-                tmp = Hfss(
-                    project=proj_obj, 
-                    non_graphical=self.params["non_graphical"],
-                    version=self.params["aedt_version"]
-                )
-                
-                existing = list(tmp.project.design_list)
-                k = 1
-                while new_design in existing:
-                    k += 1
-                    new_design = f"{self.design_base_name}_{k}"
-                    
-                try:
-                    tmp.close_desktop()
-                except Exception:
-                    pass
-                    
-            except Exception:
-                new_design = f"{self.design_base_name}_{datetime.now().strftime('%H%M%S')}"
-                
-            self.hfss = Hfss(
-                project=proj_obj, 
-                design=new_design, 
-                solution_type="DrivenModal",
-                version=self.params["aedt_version"], 
-                non_graphical=self.params["non_graphical"]
-            )
-            
-            try:
-                self.project_path = proj_obj.GetPath()
-            except Exception:
-                self.project_path = ""
-                
-            self.log_message(f"Using existing project '{self.project_display_name}', created design '{new_design}'")
-            return
-
-        # Create new project
+            self.desktop = Desktop(version=self.params["aedt_version"],
+                                   non_graphical=self.params["non_graphical"], new_desktop=True)
         if self.temp_folder is None:
             self.temp_folder = tempfile.TemporaryDirectory(suffix=".ansys")
-            
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.project_path = os.path.join(self.temp_folder.name, f"{self.project_display_name}_{ts}.aedt")
-        
-        self.hfss = Hfss(
-            project=self.project_path, 
-            design=self.design_base_name, 
-            solution_type="DrivenModal",
-            version=self.params["aedt_version"], 
-            non_graphical=self.params["non_graphical"]
-        )
-        
+        self.hfss = Hfss(project=self.project_path, design=self.design_base_name, solution_type="DrivenModal",
+                         version=self.params["aedt_version"], non_graphical=self.params["non_graphical"])
         self.log_message(f"Created new project: {self.project_path} (design '{self.design_base_name}')")
 
     def _set_design_variables(self, L, W, spacing, rows, cols, h_sub, sub_w, sub_l):
-        """Set design variables in HFSS."""
-        a = float(self.params["probe_radius"])
-        ba = float(self.params["coax_ba_ratio"])
-        b = a * ba
-        wall = float(self.params["coax_wall_thickness"])
-        Lp = float(self.params["coax_port_length"])
+        """Cria/atualiza variáveis do *design* em HFSS (unidades mm/GHz)."""
+        a = float(self.params["probe_radius"]); ba = float(self.params["coax_ba_ratio"])
+        b = a * ba; wall = float(self.params["coax_wall_thickness"]); Lp = float(self.params["coax_port_length"])
         clear = float(self.params["antipad_clearance"])
-
-        # Set variables
         self.hfss["f0"] = f"{self.params['frequency']}GHz"
-        self.hfss["h_sub"] = f"{h_sub}mm"
-        self.hfss["t_met"] = f"{self.params['metal_thickness']}mm"
-        self.hfss["patchL"] = f"{L}mm"
-        self.hfss["patchW"] = f"{W}mm"
-        self.hfss["spacing"] = f"{spacing}mm"
-        self.hfss["rows"] = str(rows)
-        self.hfss["cols"] = str(cols)
-        self.hfss["subW"] = f"{sub_w}mm"
-        self.hfss["subL"] = f"{sub_l}mm"
-        self.hfss["a"] = f"{a}mm"
-        self.hfss["b"] = f"{b}mm"
-        self.hfss["wall"] = f"{wall}mm"
-        self.hfss["Lp"] = f"{Lp}mm"
-        self.hfss["clear"] = f"{clear}mm"
-        self.hfss["eps"] = "0.001mm"
+        self.hfss["h_sub"] = f"{h_sub}mm"; self.hfss["t_met"] = f"{self.params['metal_thickness']}mm"
+        self.hfss["patchL"] = f"{L}mm"; self.hfss["patchW"] = f"{W}mm"
+        self.hfss["spacing"] = f"{spacing}mm"; self.hfss["rows"] = str(rows); self.hfss["cols"] = str(cols)
+        self.hfss["subW"] = f"{sub_w}mm"; self.hfss["subL"] = f"{sub_l}mm"
+        self.hfss["a"] = f"{a}mm"; self.hfss["b"] = f"{b}mm"; self.hfss["wall"] = f"{wall}mm"
+        self.hfss["Lp"] = f"{Lp}mm"; self.hfss["clear"] = f"{clear}mm"; self.hfss["eps"] = "0.001mm"
         self.hfss["padAir"] = f"{max(spacing, W, L)/2 + Lp + 2.0}mm"
-        
         self.log_message(f"Air coax set: a={a:.3f} mm, b={b:.3f} mm (b/a={ba:.3f}≈2.3 → ~50 Ω)")
-        
         return a, b, wall, Lp, clear
 
     def _create_coax_feed_lumped(self, ground, substrate, x_feed: float, y_feed: float, name_prefix: str):
-        """Create a coaxial feed with lumped port."""
+        """Constrói pino, blindagem e porta *lumped* no plano inferior.
+        Retorna (pin, dielectric, shield_outer) ou (None, None, None) em caso de erro.
+        """
         try:
             a_val = float(self.params["probe_radius"])
             b_val = a_val * float(self.params["coax_ba_ratio"])
@@ -1389,485 +614,275 @@ class ModernPatchAntennaDesigner:
             Lp_val = float(self.params["coax_port_length"])
             h_sub_val = float(self.params["substrate_thickness"])
             clear_val = float(self.params["antipad_clearance"])
-            
-            # Ensure minimum gap between inner and outer conductor
             if b_val - a_val < 0.02:
                 b_val = a_val + 0.02
 
-            # Create pin
-            pin = self.hfss.modeler.create_cylinder(
-                orientation="Z", 
-                origin=[x_feed, y_feed, -Lp_val],
-                radius=a_val, 
-                height=h_sub_val + Lp_val + 0.001,
-                name=f"{name_prefix}_Pin", 
-                material="copper"
-            )
-
-            # Create shield (outer conductor)
-            shield_outer = self.hfss.modeler.create_cylinder(
-                orientation="Z", 
-                origin=[x_feed, y_feed, -Lp_val],
-                radius=b_val + wall_val, 
-                height=Lp_val,
-                name=f"{name_prefix}_ShieldOuter", 
-                material="copper"
-            )
-            
-            # Create void for shield
-            shield_inner_void = self.hfss.modeler.create_cylinder(
-                orientation="Z", 
-                origin=[x_feed, y_feed, -Lp_val],
-                radius=b_val, 
-                height=Lp_val,
-                name=f"{name_prefix}_ShieldInnerVoid", 
-                material="vacuum"
-            )
-            
-            # Subtract void from shield
+            pin = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
+                                                    a_val, h_sub_val + Lp_val + 0.001,
+                                                    name=f"{name_prefix}_Pin", material="copper")
+            shield_outer = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
+                                                             b_val + wall_val, Lp_val,
+                                                             name=f"{name_prefix}_ShieldOuter", material="copper")
+            shield_inner_void = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
+                                                                  b_val, Lp_val, name=f"{name_prefix}_ShieldInnerVoid", material="vacuum")
             self.hfss.modeler.subtract(shield_outer, [shield_inner_void], keep_originals=False)
 
-            # Create hole in substrate
             hole_r = b_val + clear_val
-            sub_hole = self.hfss.modeler.create_cylinder(
-                orientation="Z", 
-                origin=[x_feed, y_feed, 0.0],
-                radius=hole_r, 
-                height=h_sub_val, 
-                name=f"{name_prefix}_SubHole", 
-                material="vacuum"
-            )
-            
-            # Subtract hole from substrate
+            sub_hole = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, 0.0],
+                                                         hole_r, h_sub_val, name=f"{name_prefix}_SubHole", material="vacuum")
             self.hfss.modeler.subtract(substrate, [sub_hole], keep_originals=False)
-            
-            # Create hole in ground plane
-            g_hole = self.hfss.modeler.create_circle(
-                orientation="XY", 
-                origin=[x_feed, y_feed, 0.0], 
-                radius=hole_r,
-                name=f"{name_prefix}_GndHole", 
-                material="vacuum"
-            )
-            
-            # Subtract hole from ground
+            g_hole = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, 0.0], hole_r,
+                                                     name=f"{name_prefix}_GndHole", material="vacuum")
             self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
 
-            # Create port ring
-            port_ring = self.hfss.modeler.create_circle(
-                orientation="XY", 
-                origin=[x_feed, y_feed, -Lp_val],
-                radius=b_val, 
-                name=f"{name_prefix}_PortRing", 
-                material="vacuum"
-            )
-            
-            # Create port hole
-            port_hole = self.hfss.modeler.create_circle(
-                orientation="XY", 
-                origin=[x_feed, y_feed, -Lp_val],
-                radius=a_val, 
-                name=f"{name_prefix}_PortHole", 
-                material="vacuum"
-            )
-            
-            # Subtract hole from ring
+            port_ring = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, -Lp_val], b_val,
+                                                        name=f"{name_prefix}_PortRing", material="vacuum")
+            port_hole = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, -Lp_val], a_val,
+                                                        name=f"{name_prefix}_PortHole", material="vacuum")
             self.hfss.modeler.subtract(port_ring, [port_hole], keep_originals=False)
 
-            # Create integration line for port
             eps_line = min(0.1 * (b_val - a_val), 0.05)
-            r_start = a_val + eps_line
-            r_end = b_val - eps_line
-            
+            r_start = a_val + eps_line; r_end = b_val - eps_line
             if r_end <= r_start:
                 r_end = a_val + 0.75 * (b_val - a_val)
-                
-            p1 = [x_feed + r_start, y_feed, -Lp_val]
-            p2 = [x_feed + r_end,   y_feed, -Lp_val]
+            p1 = [x_feed + r_start, y_feed, -Lp_val]; p2 = [x_feed + r_end, y_feed, -Lp_val]
 
-            # Create lumped port
-            _ = self.hfss.lumped_port(
-                assignment=port_ring.name,
-                integration_line=[p1, p2],
-                impedance=50.0,
-                name=f"{name_prefix}_Lumped",
-                renormalize=True
-            )
-            
+            self.hfss.lumped_port(assignment=port_ring.name, integration_line=[p1, p2],
+                                  impedance=50.0, name=f"{name_prefix}_Lumped", renormalize=True)
+            if f"{name_prefix}_Lumped" not in self.created_ports:
+                self.created_ports.append(f"{name_prefix}_Lumped")
             self.log_message(f"Lumped Port '{name_prefix}_Lumped' created (integration line).")
             return pin, None, shield_outer
-            
         except Exception as e:
-            self.log_message(f"Exception in coax creation '{name_prefix}': {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Exception in coax creation '{name_prefix}': {e}\nTraceback: {traceback.format_exc()}")
             return None, None, None
 
-
-    def _ensure_post_vars_for_excitations(self, excitations: List[str],
-                                        default_mag: str = "1V",
-                                        default_phase: str = "0deg") -> Tuple[List[str], List[str]]:
-        """Para cada porta, garante p{i} e ph{i} como variáveis de design (idempotente).
-        Retorna as listas de nomes a serem referenciadas no EditSources.
-        """
-        pvars, phvars = [], []
-        for i, _ in enumerate(excitations, start=1):
-            p_name = f"p{i}"
-            ph_name = f"ph{i}"
-
-            if not self._set_design_variable(p_name, default_mag, overwrite=False):
-                # fallback: usa literal se der erro ao criar variável
-                p_name = default_mag
-
-            if not self._set_design_variable(ph_name, default_phase, overwrite=False):
-                ph_name = default_phase
-
-            pvars.append(p_name)
-            phvars.append(ph_name)
-
-        return pvars, phvars
-
-    def _set_design_variable(self, name: str, value: str, overwrite: bool = False) -> bool:
-        """Garante uma variável de design (local) com valor e unidades corretas.
-        Usa o mecanismo padrão do AEDT/HFSS (design variables), que são visíveis ao pós-processamento.
+    # ---------- Pós-solve helpers ----------
+    def _add_or_set_post_var(self, name: str, value: str) -> bool:
+        """Tenta atualizar variável de pós-processamento; se não existir, cria.
+        Usa *ChangeProperty* com **ChangedProps** (update) e *NewProps* (create).
         """
         try:
-            try:
-                existing = set(self.hfss.odesign.GetVariables())
-            except Exception:
-                existing = set()
-
-            if (name in existing) and not overwrite:
-                self.log_message(f"Design variable já existe: {name} (mantida)")
-                return True
-
-            # Define/atualiza a variável como variável de design
-            self.hfss[name] = value  # ex.: "1V", "0deg"
-            self.log_message(f"Design variable definida: {name} = {value}")
+            # 1) Tenta alterar se já existir
+            props_set = [
+                "NAME:AllTabs",
+                ["NAME:LocalVariableTab",
+                 ["NAME:PropServers", "LocalVariables"],
+                 ["NAME:ChangedProps",
+                  [f"NAME:{name}", "Value:=", value]]]
+            ]
+            self.hfss.odesign.ChangeProperty(props_set)
+            self.log_message(f"Post var '{name}' set to {value}.")
             return True
-        except Exception as e:
-            self.log_message(f"Falha ao definir variável '{name}': {e}")
-            return False
+        except Exception:
+            # 2) Tenta criar se não existia
+            try:
+                props_new = [
+                    "NAME:AllTabs",
+                    ["NAME:LocalVariableTab",
+                     ["NAME:PropServers", "LocalVariables"],
+                     ["NAME:NewProps",
+                      [f"NAME:{name}", "PropType:=", "PostProcessingVariableProp", "UserDef:=", True, "Value:=", value]]]
+                ]
+                self.hfss.odesign.ChangeProperty(props_new)
+                self.log_message(f"Post var '{name}' created = {value}.")
+                return True
+            except Exception as e:
+                self.log_message(f"Add/Set post var '{name}' failed: {e}")
+                return False
 
+    def _add_post_var(self, name: str, value: str) -> bool:
+        """Compatibilidade retro: cria variável; se existir, tenta atualizar."""
+        return self._add_or_set_post_var(name, value)
 
     def _edit_sources_with_vars(self, excitations: List[str], pvars: List[str], phvars: List[str]) -> bool:
-        """Aplica magnitude/fase em cada excitação usando as variáveis p{i}/ph{i}.
-        Prefere a API de alto nível do PyAEDT; se indisponível, usa o COM com a estrutura correta.
-        """
+        """Chama *Solutions.EditSources* ligando cada excitação a p_i (magnitude) e ph_i (fase)."""
         try:
-            # 1) Tente a API de alto nível (PyAEDT >= 0.8 aprox.)
-            if hasattr(self.hfss, "edit_sources"):
-                ok = self.hfss.edit_sources(source_names=excitations,
-                                            magnitudes=pvars,
-                                            phases=phvars)
-                if ok:
-                    self.log_message("EditSources aplicado via API PyAEDT.")
-                    return True
-
-            # 2) Fallback COM nativo com a sintaxe correta
             sol = self.hfss.odesign.GetModule("Solutions")
-            # Cabeçalho
-            args = ["IncludePortPostProcessing:=", False, "SpecifySystemPower:=", False]
-            # Bloco de fontes
-            sources_block = ["NAME:Sources"]
-            for name, mag, ph in zip(excitations, pvars, phvars):
-                # Estrutura esperada: ["NAME:Source", "Name:=", <porta>, "Magnitude:=", <expr>, "Phase:=", <expr>, "UseMagPhase:=", True]
-                sources_block.append(["NAME:Source",
-                                    "Name:=", name,
-                                    "Magnitude:=", mag,
-                                    "Phase:=", ph,
-                                    "UseMagPhase:=", True])
-
-            sol.EditSources(args + [sources_block])
-            self.log_message("EditSources aplicado via COM nativo.")
+            header = ["IncludePortPostProcessing:=", False, "SpecifySystemPower:=", False]
+            cmd = [header]
+            for ex, p, ph in zip(excitations, pvars, phvars):
+                cmd.append(["Name:=", ex, "Magnitude:=", p, "Phase:=", ph])
+            sol.EditSources(cmd)
+            self.log_message(f"Solutions.EditSources applied to {len(excitations)} port(s).")
             return True
-
         except Exception as e:
-            self.log_message(f"EditSources falhou: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"EditSources failed: {e}")
             return False
 
-
-    def _create_infinite_sphere_after(self, name="Infinite Sphere1"):
-        """Create an infinite sphere for far-field analysis."""
+    def _ensure_infinite_sphere(self, name="Infinite Sphere1") -> Optional[str]:
+        """Cria (ou recria) *Infinite Sphere* com amostragem 1° x 1°."""
         try:
             rf = self.hfss.odesign.GetModule("RadField")
-            props = [
-                f"NAME:{name}",
-                "UseCustomRadiationSurface:=", False,
-                "CSDefinition:=", "Theta-Phi",
-                "Polarization:=", "Linear",
-                "ThetaStart:=", "-180deg",
-                "ThetaStop:=", "180deg",
-                "ThetaStep:=", "1deg",
-                "PhiStart:=", "-180deg",
-                "PhiStop:=", "180deg",
-                "PhiStep:=", "1deg",
-                "UseLocalCS:=", False
-            ]
-            
+            # remove duplicata se já houver com mesmo nome
+            try:
+                setups = list(rf.GetSetups())
+                if name in setups:
+                    rf.DeleteSetup(name)
+            except Exception:
+                pass
+            props = [f"NAME:{name}",
+                     "UseCustomRadiationSurface:=", False,
+                     "CSDefinition:=", "Theta-Phi",
+                     "Polarization:=", "Linear",
+                     "ThetaStart:=", "-180deg", "ThetaStop:=", "180deg", "ThetaStep:=", "1deg",
+                     "PhiStart:=", "-180deg", "PhiStop:=", "180deg", "PhiStep:=", "1deg",
+                     "UseLocalCS:=", False]
             rf.InsertInfiniteSphereSetup(props)
-            self.log_message(f"Infinite sphere '{name}' created (theta -180..180, phi -180..180, 1deg).")
+            self.log_message(f"Infinite sphere '{name}' created.")
             return name
-            
         except Exception as e:
             self.log_message(f"Infinite sphere creation failed: {e}")
             return None
 
     def _postprocess_after_solve(self):
-        """Pós-processamento: garante variáveis p{i}/ph{i}, aplica EditSources e cria esfera infinita."""
+        """Cria p_i/ph_i e aplica em *EditSources*; popula UI de fontes."""
         try:
-            # 1) Portas/excitações do design
-            try:
-                exs = self.hfss.get_excitations_name() or []
-            except Exception:
-                exs = []
-
+            exs = self._list_excitations()
             if not exs:
-                self.log_message("Nenhuma excitação encontrada para pós-processamento.")
+                self.log_message("No excitations found for post-processing.")
                 return
-
-            # 2) Garante p{i}/ph{i} como variáveis de design (1V / 0deg por padrão)
-            pvars, phvars = self._ensure_post_vars_for_excitations(exs, default_mag="1V", default_phase="0deg")
-
-            # 3) Aplica as variáveis nas fontes
+            pvars, phvars = [], []
+            for i in range(1, len(exs) + 1):
+                p = f"p{i}"; ph = f"ph{i}"
+                self._add_or_set_post_var(p, "1W");  self._add_or_set_post_var(ph, "0deg")
+                pvars.append(p); phvars.append(ph)
             self._edit_sources_with_vars(exs, pvars, phvars)
-
-            # 4) Garante esfera infinita para FF (mantém seu nome и varreduras)
-            self._create_infinite_sphere_after(name="Infinite Sphere1")
-
+            # construir painel de fontes na UI
+            self.populate_source_controls(exs)
         except Exception as e:
-            self.log_message(f"Erro no pós-processamento: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Postprocess-after-solve error: {e}")
 
+    # ------------- Helpers de solução -------------
+    def _fetch_solution(self, expression: str, setup_candidates: Optional[List[str]] = None, **kwargs):
+        """Wrapper robusto para `post.get_solution_data` tentando diferentes nomes de setup/sweep.
 
-    # ------------- Far Field Analysis -------------
-    def _get_gain_cut(self, frequency: float, cut: str, fixed_angle_deg: float):
-        """Get far-field gain data for a specific cut (theta or phi) at a given frequency.
-        
         Args:
-            frequency: Frequency in GHz
-            cut: Either 'theta' or 'phi'
-            fixed_angle_deg: Fixed angle for the cut in degrees
-            
-        Returns:
-            Tuple of (angle_values, gain_values) or (None, None) if data is not available
+            expression: Ex.: "dB(GainTotal)", "dB(S(1,1))", "re(S(1,1))".
+            setup_candidates: ordem de tentativa. Se None, usa um *default* amplo.
+            **kwargs: primary_sweep_variable, variations, context, etc.
         """
-        try:
-            # Create a unique report name based on the cut
-            report_name = f"Gain_{cut}_cut_{fixed_angle_deg}deg"
-            
-            # Define the expression for gain in dB
-            expression = "dB(GainTotal)"
-            
-            # Set up variations based on cut type
-            if cut == "theta":
-                # Theta cut: vary theta, fix phi
-                variations = {
-                    "Freq": f"{frequency}GHz",
-                    "Phi": f"{fixed_angle_deg}deg",
-                    "Theta": "All"
-                }
-                primary_sweep = "Theta"
+        if setup_candidates is None:
+            setup_candidates = ["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive", "Setup1:LastAdaptive"]
+        last_err = None
+        for setup in setup_candidates:
+            try:
+                sd = self.hfss.post.get_solution_data(expressions=[expression], setup_sweep_name=setup, **kwargs)
+                if sd and hasattr(sd, "primary_sweep_values"):
+                    return sd
+            except Exception as e:
+                last_err = e
+        if last_err:
+            self.log_message(f"get_solution_data failed for '{expression}': {last_err}")
+        return None
+
+    def _shape_series(self, data_obj, npoints: int) -> np.ndarray:
+        """Converte retorno de `data_real()` em ndarray 1D com tamanho esperado."""
+        if isinstance(data_obj, (list, tuple)):
+            if len(data_obj) == 0:
+                return np.array([], dtype=float)
+            if hasattr(data_obj[0], "__len__"):
+                arr = np.asarray(data_obj[0], dtype=float)
             else:
-                # Phi cut: vary phi, fix theta
-                variations = {
-                    "Freq": f"{frequency}GHz",
-                    "Theta": f"{fixed_angle_deg}deg",
-                    "Phi": "All"
-                }
-                primary_sweep = "Phi"
-            
-            # Create the far field report - FIXED: removed report_category parameter
-            report = self.hfss.post.reports_by_category.far_field(
-                expressions=[expression],
-                context="Infinite Sphere1",
-                primary_sweep_variable=primary_sweep,
-                setup_name="Setup1 : Sweep1",
-                variations=variations,
-                name=report_name
-            )
-            
-            # Get the solution data
-            solution_data = report.get_solution_data()
-            
-            if solution_data and hasattr(solution_data, 'primary_sweep_values'):
-                angles = np.array(solution_data.primary_sweep_values)
-                gains = np.array(solution_data.data_real())[0]  # Get first (and only) expression data
-                
-                # Ensure we have valid data
-                if len(angles) > 0 and len(angles) == len(gains):
-                    return angles, gains
-            
-            return None, None
-            
-        except Exception as e:
-            self.log_message(f"Error getting {cut} cut data: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
-            return None, None
+                arr = np.asarray(data_obj, dtype=float)
+        else:
+            arr = np.asarray(data_obj, dtype=float)
+        arr = np.atleast_1d(arr).astype(float)
+        if npoints > 0 and arr.size not in (1, npoints):
+            return np.array([], dtype=float)
+        return arr
 
-    # ------------- Frequency Optimization -------------
-    def analyze_and_optimize(self):
-        """Analyze S11 peak and optimize design if needed."""
-        if self.simulation_data is None:
-            self.log_message("No simulation data available for optimization")
-            messagebox.showerror("Error", "No simulation data available. Please run a simulation first.")
-            return
-            
+    def _list_excitations(self) -> List[str]:
+        """Obtém nomes das excitações da simulação; ordena por índice Pn quando possível."""
+        names = []
         try:
-            # Find the frequency with minimum S11 (peak resonance)
-            frequencies = self.simulation_data[:, 0]
-            s11 = self.simulation_data[:, 1]
-            min_idx = np.argmin(s11)
-            resonant_freq = frequencies[min_idx]
-            target_freq = self.params["frequency"]
-            min_s11 = s11[min_idx]
-            
-            self.log_message(f"Resonant frequency: {resonant_freq:.3f} GHz, Target: {target_freq:.3f} GHz")
-            self.log_message(f"Minimum S11: {min_s11:.2f} dB")
-            
-            # Calculate the error percentage
-            error_percent = abs(resonant_freq - target_freq) / target_freq * 100
-            
-            # Create detailed analysis message
-            analysis_msg = f"Frequency Analysis Results:\n\n"
-            analysis_msg += f"Target Frequency: {target_freq:.3f} GHz\n"
-            analysis_msg += f"Measured Resonance: {resonant_freq:.3f} GHz\n"
-            analysis_msg += f"Frequency Error: {error_percent:.1f}%\n"
-            analysis_msg += f"Minimum S11: {min_s11:.2f} dB\n\n"
-            
-            if error_percent < 2:  # Less than 2% error
-                analysis_msg += "✅ Design is within acceptable tolerance (≤2% error)."
-                messagebox.showinfo("Frequency Analysis", analysis_msg)
-                return
-                
-            # Calculate the correct scaling factor
-            # For patch antennas: f_resonant ∝ 1/size, so we need to adjust dimensions inversely
-            if resonant_freq < target_freq:
-                # Resonance is too low -> antenna is too large -> need to make smaller
-                scaling_factor = resonant_freq / target_freq  # This will be <1
-                size_change = "decrease"
-                freq_direction = "increase"
+            names = self.hfss.get_excitations_name() or []
+        except Exception:
+            names = []
+        if not names and self.created_ports:
+            names = [f"{p}:1" for p in self.created_ports]
+
+        def keyfn(s: str) -> int:
+            m = re.search(r"P(\d+)_Lumped", s)
+            return int(m.group(1)) if m else 1_000_000
+
+        names.sort(key=keyfn)
+        return names
+
+    # ------------- Far Field (cuts & 3D) -------------
+    def _get_gain_cut(self, frequency: float, cut: str, fixed_angle_deg: float):
+        """Retorna (ângulo, ganho_dB) para corte Theta ou Phi em `frequency` GHz."""
+        try:
+            expr = "dB(GainTotal)"
+            if cut.lower() == "theta":
+                variations = {"Freq": f"{frequency}GHz", "Theta": "All", "Phi": f"{fixed_angle_deg}deg"}
+                prim = "Theta"
             else:
-                # Resonance is too high -> antenna is too small -> need to make larger
-                scaling_factor = resonant_freq / target_freq  # This will be >1
-                size_change = "increase"
-                freq_direction = "decrease"
-            
-            analysis_msg += f"Recommended adjustment: {size_change} size by factor {scaling_factor:.3f}\n"
-            analysis_msg += f"to {freq_direction} resonant frequency toward target."
-            
-            # Ask user if they want to optimize
-            response = messagebox.askyesno("Frequency Optimization", 
-                                          analysis_msg + "\n\nWould you like to optimize the design?")
-            
-            if not response:
-                return
-                
-            # Store original parameters for comparison if this is the first optimization
-            if not self.optimized:
-                self.original_params = self.calculated_params.copy()
-                self.optimization_history = []
-            
-            # Record this optimization step
-            optimization_step = {
-                "iteration": len(self.optimization_history) + 1,
-                "resonant_freq": resonant_freq,
-                "target_freq": target_freq,
-                "error_percent": error_percent,
-                "min_s11": min_s11,
-                "scaling_factor": scaling_factor,
-                "size_change": size_change
-            }
-            self.optimization_history.append(optimization_step)
-            
-            self.log_message(f"Optimizing design with scaling factor: {scaling_factor:.4f}")
-            self.log_message(f"Size change: {size_change}")
-            
-            # Apply scaling to all dimensions
-            dimension_keys = ["patch_length", "patch_width", "spacing", "feed_offset", 
-                             "substrate_width", "substrate_length"]
-            
-            for key in dimension_keys:
-                self.calculated_params[key] *= scaling_factor
-                
-            # Update guided wavelength
-            self.calculated_params["lambda_g"] *= scaling_factor
-                
-            # Update UI with new dimensions
-            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
-            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
-            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
-            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
-            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
-            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
-            self.substrate_dims_label.configure(
-                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
-            
-            # Set optimized flag
-            self.optimized = True
-            
-            # Ask if user wants to run simulation with new dimensions
-            response = messagebox.askyesno("Run Optimization", 
-                                          "Design parameters have been adjusted. Would you like to run the simulation with the optimized dimensions?")
-            
-            if response:
-                self.start_simulation_thread()
-                
+                variations = {"Freq": f"{frequency}GHz", "Theta": f"{fixed_angle_deg}deg", "Phi": "All"}
+                prim = "Phi"
+            sd = self._fetch_solution(expr, primary_sweep_variable=prim, variations=variations, context="Infinite Sphere1")
+            if not sd or not hasattr(sd, "primary_sweep_values"):
+                return None, None
+            ang = np.asarray(sd.primary_sweep_values, dtype=float)
+            gains = self._shape_series(sd.data_real(), ang.size)
+            if gains.size == ang.size and gains.size > 0:
+                return ang, gains
+            return None, None
         except Exception as e:
-            self.log_message(f"Error in frequency optimization: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
-            messagebox.showerror("Error", f"Optimization failed: {e}")
+            self.log_message(f"Error getting {cut} cut: {e}")
+            return None, None
 
-    def reset_to_original(self):
-        """Reset design to original parameters."""
-        if not self.optimized:
-            messagebox.showinfo("Reset", "Design is already at original parameters.")
-            return
-            
-        response = messagebox.askyesno("Reset Design", 
-                                      "Are you sure you want to reset all parameters to their original values?")
-        
-        if response:
-            # Restore original parameters
-            for key in self.original_params:
-                self.calculated_params[key] = self.original_params[key]
-                
-            # Update UI
-            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
-            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
-            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
-            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
-            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
-            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
-            self.substrate_dims_label.configure(
-                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
-            
-            # Reset flags
-            self.optimized = False
-            self.optimization_history = []
-            
-            self.log_message("Design reset to original parameters")
-            messagebox.showinfo("Reset Complete", "Design parameters have been reset to their original values.")
+    def _get_gain_3d_grid(self, frequency: float, theta_step=10.0, phi_step=10.0):
+        """Varre Phi (fixo) e pega Theta = All para montar grade 3D normalizada."""
+        try:
+            phi_vals = np.arange(-180.0, 180.0 + phi_step, phi_step)
+            TH_list, G_list = None, []
+            for phi in phi_vals:
+                sd = self._fetch_solution(
+                    "dB(GainTotal)",
+                    primary_sweep_variable="Theta",
+                    variations={"Freq": f"{frequency}GHz", "Theta": "All", "Phi": f"{phi}deg"},
+                    context="Infinite Sphere1"
+                )
+                if not sd or not hasattr(sd, "primary_sweep_values"):
+                    continue
+                th = np.asarray(sd.primary_sweep_values, dtype=float)
+                g = self._shape_series(sd.data_real(), th.size)
+                if g.size != th.size or g.size == 0:
+                    continue
+                if TH_list is None:
+                    TH_list = th
+                else:
+                    if th.size != TH_list.size:
+                        # ignora phi com vetor de theta inconsistente
+                        continue
+                G_list.append(g)
+            if TH_list is None or len(G_list) == 0:
+                return None
+            G = np.vstack(G_list).T  # shape (Ntheta, Nphi)
+            PH = phi_vals[:G.shape[1]]
+            TH = TH_list
+            return TH, PH, G
+        except Exception as e:
+            self.log_message(f"3D grid error: {e}")
+            return None
 
-    # ------------- Simulation -------------
+    # ------------- Simulação -------------
     def start_simulation_thread(self):
-        """Start simulation in a separate thread."""
+        """Inicia a simulação em *thread* separada para manter a UI responsiva."""
         if self.is_simulation_running:
             self.log_message("Simulation is already running")
             return
-            
         self.stop_simulation = False
         self.is_simulation_running = True
-        
         threading.Thread(target=self.run_simulation, daemon=True).start()
 
     def stop_simulation_thread(self):
-        """Request simulation stop."""
         self.stop_simulation = True
         self.log_message("Simulation stop requested")
 
     def run_simulation(self):
-        """Run the simulation."""
+        """Fluxo completo: criar projeto, geometria, *setup/sweep*, analisar e pós-processar."""
         try:
             self.log_message("Starting simulation")
             self.run_button.configure(state="disabled")
@@ -1875,139 +890,74 @@ class ModernPatchAntennaDesigner:
             self.sim_status_label.configure(text="Simulation in progress")
             self.progress_bar.set(0)
 
-            # Get parameters
             if not self.get_parameters():
                 self.log_message("Invalid parameters. Aborting.")
                 return
-                
-            # Calculate parameters if not already done
             if self.calculated_params["num_patches"] < 1:
                 self.calculate_parameters()
 
-            # Open or create project
             self._open_or_create_project()
             self.progress_bar.set(0.25)
 
-            # Set model units
-            self.hfss.modeler.model_units = "mm"
-            self.log_message("Model units set to: mm")
+            self.hfss.modeler.model_units = "mm"; self.log_message("Model units set to: mm")
 
-            # Handle substrate material
             sub_name = self.params["substrate_material"]
             if not self.hfss.materials.checkifmaterialexists(sub_name):
                 sub_name = "Custom_Substrate"
                 self._ensure_material(sub_name, float(self.params["er"]), float(self.params["tan_d"]))
 
-            # Get calculated parameters
             L = float(self.calculated_params["patch_length"])
             W = float(self.calculated_params["patch_width"])
             spacing = float(self.calculated_params["spacing"])
-            rows = int(self.calculated_params["rows"])
-            cols = int(self.calculated_params["cols"])
+            rows = int(self.calculated_params["rows"]); cols = int(self.calculated_params["cols"])
             h_sub = float(self.params["substrate_thickness"])
-            sub_w = float(self.calculated_params["substrate_width"])
-            sub_l = float(self.calculated_params["substrate_length"])
+            sub_w = float(self.calculated_params["substrate_width"]); sub_l = float(self.calculated_params["substrate_length"])
 
-            # Set design variables
             self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
+            self.created_ports.clear()
 
-            # Create substrate
             self.log_message("Creating substrate")
-            substrate = self.hfss.modeler.create_box(
-                origin=["-subW/2", "-subL/2", 0],
-                sizes=["subW", "subL", "h_sub"],
-                name="Substrate",
-                material=sub_name
-            )
-            
-            # Create ground plane
+            substrate = self.hfss.modeler.create_box(["-subW/2", "-subL/2", 0], ["subW", "subL", "h_sub"], "Substrate", sub_name)
             self.log_message("Creating ground plane")
-            ground = self.hfss.modeler.create_rectangle(
-                orientation="XY",
-                origin=["-subW/2", "-subL/2", 0],
-                sizes=["subW", "subL"],
-                name="Ground",
-                material="copper"
-            )
+            ground = self.hfss.modeler.create_rectangle("XY", ["-subW/2", "-subL/2", 0], ["subW", "subL"], "Ground", "copper")
 
-            # Create patches
-            self.log_message(f"Creating {rows*cols} patches in {rows*cols} configuration")
+            self.log_message(f"Creating {rows*cols} patches in {rows}x{cols} configuration")
             patches = []
-            total_w = cols * W + (cols - 1) * spacing
-            total_l = rows * L + (rows - 1) * spacing
-            start_x = -total_w / 2 + W / 2
-            start_y = -total_l / 2 + L / 2
+            total_w = cols * W + (cols - 1) * spacing; total_l = rows * L + (rows - 1) * spacing
+            start_x = -total_w / 2 + W / 2; start_y = -total_l / 2 + L / 2
             self.progress_bar.set(0.35)
 
-            # Create each patch
             count = 0
             for r in range(rows):
                 for c in range(cols):
                     if self.stop_simulation:
-                        self.log_message("Simulation stopped by user")
-                        return
-                        
-                    count += 1
-                    patch_name = f"Patch_{count}"
-                    cx = start_x + c * (W + spacing)
-                    cy = start_y + r * (L + spacing)
-
+                        self.log_message("Simulation stopped by user"); return
+                    count += 1; patch_name = f"Patch_{count}"
+                    cx = start_x + c * (W + spacing); cy = start_y + r * (L + spacing)
                     origin = [cx - W / 2, cy - L / 2, "h_sub"]
                     self.log_message(f"Creating patch {count} at ({r}, {c})")
-
-                    # Create patch
-                    patch = self.hfss.modeler.create_rectangle(
-                        orientation="XY",
-                        origin=origin,
-                        sizes=["patchW", "patchL"],
-                        name=patch_name,
-                        material="copper"
-                    )
+                    patch = self.hfss.modeler.create_rectangle("XY", origin, ["patchW", "patchL"], patch_name, "copper")
                     patches.append(patch)
 
-                    # Calculate feed position
                     if self.params["feed_position"] == "edge":
                         y_feed = cy - 0.5 * L + 0.02 * L
                     else:
                         y_feed = cy - 0.5 * L + 0.30 * L
-                        
-                    relx = float(self.params["feed_rel_x"])
-                    relx = min(max(relx, 0.0), 1.0)
+                    relx = float(self.params["feed_rel_x"]); relx = min(max(relx, 0.0), 1.0)
                     x_feed = cx - 0.5 * W + relx * W
 
-                    # Create feed pad
-                    pad = self.hfss.modeler.create_circle(
-                        orientation="XY",
-                        origin=[x_feed, y_feed, "h_sub"],
-                        radius="a",
-                        name=f"{patch_name}_Pad",
-                        material="copper"
-                    )
-                    
-                    # Unite patch and pad
+                    pad = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, "h_sub"], "a", f"{patch_name}_Pad", "copper")
                     try:
                         self.hfss.modeler.unite([patch, pad])
                     except Exception:
                         pass
 
-                    # Create coaxial feed
-                    self._create_coax_feed_lumped(
-                        ground=ground,
-                        substrate=substrate,
-                        x_feed=x_feed,
-                        y_feed=y_feed,
-                        name_prefix=f"P{count}"
-                    )
-                    
-                    # Update progress
+                    self._create_coax_feed_lumped(ground=ground, substrate=substrate, x_feed=x_feed, y_feed=y_feed, name_prefix=f"P{count}")
                     self.progress_bar.set(0.35 + 0.25 * (count / float(rows * cols)))
 
-            # Check if simulation was stopped
             if self.stop_simulation:
-                self.log_message("Simulation stopped by user")
-                return
+                self.log_message("Simulation stopped by user"); return
 
-            # Assign PerfectE boundary to ground and patches
             try:
                 names = [ground.name] + [p.name for p in patches]
                 self.hfss.assign_perfecte_to_sheets(names)
@@ -2015,368 +965,434 @@ class ModernPatchAntennaDesigner:
             except Exception as e:
                 self.log_message(f"PerfectE assignment warning: {e}")
 
-            # Create air region and radiation boundary
             self.log_message("Creating air region + radiation boundary")
             lambda0_mm = self.c / (self.params["sweep_start"] * 1e9) * 1000.0
             pad_mm = float(lambda0_mm) / 4.0
-            
-            region = self.hfss.modeler.create_region(
-                [pad_mm, pad_mm, pad_mm, pad_mm, pad_mm, pad_mm], 
-                is_percentage=False
-            )
-            
+            region = self.hfss.modeler.create_region([pad_mm]*6, is_percentage=False)
             self.hfss.assign_radiation_boundary_to_objects(region)
             self.progress_bar.set(0.65)
 
-            # Create simulation setup
+            # Esfera antes do solve (para ter far-field)
+            self._ensure_infinite_sphere("Infinite Sphere1")
+
+            # Setup
             self.log_message("Creating simulation setup")
             setup = self.hfss.create_setup(name="Setup1", setup_type="HFSSDriven")
             setup.props["Frequency"] = f"{self.params['frequency']}GHz"
             setup.props["MaxDeltaS"] = 0.02
+            try:
+                setup.props["SaveFields"] = False
+                setup.props["SaveRadFields"] = True
+            except Exception:
+                pass
 
-            # Create frequency sweep
             self.log_message(f"Creating frequency sweep: {self.params['sweep_type']}")
             stype = self.params["sweep_type"]
-            
             try:
-                # Delete existing sweep if any
                 try:
-                    sw = setup.get_sweep("Sweep1")
-                    if sw:
-                        sw.delete()
+                    sw = setup.get_sweep("Sweep1");  sw.delete() if sw else None
                 except Exception:
                     pass
-
-                # Create appropriate sweep type
                 if stype == "Discrete":
                     step = float(self.params["sweep_step"])
-                    setup.create_linear_step_sweep(
-                        unit="GHz",
-                        start_frequency=self.params["sweep_start"],
-                        stop_frequency=self.params["sweep_stop"],
-                        step_size=step,
-                        name="Sweep1"
-                    )
+                    setup.create_linear_step_sweep(unit="GHz", start_frequency=self.params["sweep_start"],
+                                                   stop_frequency=self.params["sweep_stop"], step_size=step, name="Sweep1")
                 elif stype == "Fast":
-                    setup.create_frequency_sweep(
-                        unit="GHz",
-                        name="Sweep1",
-                        start_frequency=self.params["sweep_start"],
-                        stop_frequency=self.params["sweep_stop"],
-                        sweep_type="Fast"
-                    )
-                else:  # Interpolating
-                    setup.create_frequency_sweep(
-                        unit="GHz",
-                        name="Sweep1",
-                        start_frequency=self.params["sweep_start"],
-                        stop_frequency=self.params["sweep_stop"],
-                        sweep_type="Interpolating"
-                    )
-                    
+                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
+                                                 start_frequency=self.params["sweep_start"],
+                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Fast")
+                else:
+                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
+                                                 start_frequency=self.params["sweep_start"],
+                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Interpolating")
             except Exception as e:
                 self.log_message(f"Sweep creation warning: {e}")
 
-            # Assign mesh refinement
-            self.log_message("Assigning local mesh refinement")
-            try:
-                lambda_g_mm = max(1e-6, self.calculated_params["lambda_g"])
-                edge_len = max(lambda_g_mm / 60.0, W / 200.0)
-                
-                for p in patches:
-                    self.hfss.mesh.assign_length_mesh([p], maximum_length=f"{edge_len}mm")
-                    
-            except Exception as e:
-                self.log_message(f"Mesh refinement warning: {e}")
-
-            # Check excitations
-            try:
-                exs = self.hfss.get_excitations_name() or []
-            except Exception:
-                exs = list(getattr(self.hfss, "excitations", []) or [])
-                
+            exs = self._list_excitations()
             self.log_message(f"Excitations created: {len(exs)} -> {exs}")
-            
-            if not exs:
-                self.sim_status_label.configure(text="No excitations defined")
-                self.log_message("No excitations found. Aborting before solve.")
-                return
 
-            # Validate design
             self.log_message("Validating design")
             try:
                 _ = self.hfss.validate_full_design()
             except Exception as e:
                 self.log_message(f"Validation warning: {e}")
 
-            # Start analysis
             self.log_message("Starting analysis")
             if self.save_project:
                 self.hfss.save_project()
-                
             self.hfss.analyze_setup("Setup1", cores=self.params["cores"])
-
-            # Check if simulation was stopped
             if self.stop_simulation:
-                self.log_message("Simulation stopped by user")
-                return
+                self.log_message("Simulation stopped by user"); return
 
-            # Perform post-processing
             self._postprocess_after_solve()
-
-            # Process results
             self.progress_bar.set(0.9)
             self.log_message("Processing results")
-            self.plot_results()
-            
-            # Finalize
+            self.analyze_and_mark_s11()     # também redesenha cortes
+            self.refresh_patterns_only()    # inclui 3D
             self.progress_bar.set(1.0)
             self.sim_status_label.configure(text="Simulation completed")
             self.log_message("Simulation completed successfully")
-            
         except Exception as e:
-            self.log_message(f"Error in simulation: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Error in simulation: {e}\nTraceback: {traceback.format_exc()}")
             self.sim_status_label.configure(text=f"Simulation error: {e}")
-            
         finally:
             self.run_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
             self.is_simulation_running = False
 
-    def plot_results(self):
-        """Plot simulation results."""
+    # ------------- S11 / VSWR / |Z| -------------
+    def _get_s11_curves(self):
+        """Obtém f, S11(dB) e (opcional) re/im de S11 para cálculo de Z."""
+        exs = self._list_excitations()
+        if not exs:
+            return None
+        port_name = exs[0].split(":")[0]
+
+        # tentar por nome (compatível com portas nomeadas)
+        for expr_tpl in [f"( {port_name},{port_name} )", f"({port_name},{port_name})"]:
+            sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
+            if sd_db and hasattr(sd_db, "primary_sweep_values"):
+                f = np.asarray(sd_db.primary_sweep_values, dtype=float)
+                y_db = self._shape_series(sd_db.data_real(), f.size)
+                if y_db.size == f.size and f.size > 0:
+                    sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+                    sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+                    reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
+                    imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
+                    return f, y_db, reS, imS
+
+        # fallback por índice
+        expr_tpl = "(1,1)"
+        sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
+        if not sd_db:
+            return None
+        f = np.asarray(sd_db.primary_sweep_values, dtype=float)
+        y_db = self._shape_series(sd_db.data_real(), f.size)
+        sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+        sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+        reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
+        imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
+        return f, y_db, reS, imS
+
+    def analyze_and_mark_s11(self):
+        """Plota S11 e VSWR; estima Z=50*(1+S)/(1-S) no mínimo de S11, se possível."""
         try:
-            self.log_message("Plotting results")
+            # Limpa S11/Imp
+            self.ax_s11.clear(); self.ax_imp.clear()
 
-            # Clear all axes
-            self.ax_s11.clear()
-            self.ax_vswr.clear()
-            self.ax_z.clear()
-            
-            # Determine S-parameter expression
-            try:
-                exs = self.hfss.get_excitations_name() or []
-            except Exception:
-                exs = []
-                
-            expr = "dB(S(1,1))"
-            if exs:
-                p = exs[0].split(":")[0]
-                expr = f"dB(S({p},{p}))"
+            data = self._get_s11_curves()
+            if not data:
+                self.log_message("Solution Data failed to load. Check solution, context or expression.")
+                self.canvas.draw(); return
+            f, s11_db, reS, imS = data
+            if f.size == 0 or s11_db.size == 0:
+                self.log_message("S11 analysis aborted: empty curve.")
+                self.canvas.draw(); return
 
-            # Get S-parameter data
-            try:
-                rpt = self.hfss.post.reports_by_category.standard(expressions=[expr])
-                rpt.context = ["Setup1: Sweep1"]
-                sol = rpt.get_solution_data()
-            except Exception:
-                sol = None
+            # S11 dB
+            self.ax_s11.plot(f, s11_db, linewidth=2, label="S11 (dB)")
+            self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
+            self.ax_s11.set_xlabel("Frequency (GHz)")
+            self.ax_s11.set_ylabel("S11 (dB)")
+            self.ax_s11.set_title("S11 & VSWR")
+            self.ax_s11.grid(True, alpha=0.5)
 
-            # Plot S11
-            if sol:
-                try:
-                    freqs = np.asarray(sol.primary_sweep_values, dtype=float)
-                    data = sol.data_real()
-                    
-                    if isinstance(data, (list, tuple)) and len(data) > 0 and hasattr(data[0], "__len__"):
-                        y = np.asarray(data[0], dtype=float)
-                    else:
-                        y = np.asarray(data, dtype=float)
-                        
-                    if y.size == freqs.size:
-                        self.simulation_data = np.column_stack((freqs, y))
-                        
-                        # Plot original data if available
-                        if hasattr(self, 'original_simulation_data') and self.original_simulation_data is not None:
-                            self.ax_s11.plot(
-                                self.original_simulation_data[:, 0], 
-                                self.original_simulation_data[:, 1], 
-                                '--', 
-                                label='Original',
-                                linewidth=2,
-                                alpha=0.7
-                            )
-                        
-                        # Plot current data
-                        label = 'Optimized' if self.optimized else 'Simulated'
-                        if self.optimized and len(self.optimization_history) > 0:
-                            label += f' (Iteration {len(self.optimization_history)})'
-                        
-                        self.ax_s11.plot(freqs, y, label=label, linewidth=2)
-                        self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
-                        self.ax_s11.set_xlabel("Frequency (GHz)")
-                        self.ax_s11.set_ylabel("S-Parameter (dB)")
-                        
-                        title = "S11 - Coax-fed Patch Array"
-                        if self.optimized:
-                            title += f" (Optimized - Iteration {len(self.optimization_history)})"
-                        self.ax_s11.set_title(title)
-                        
-                        self.ax_s11.legend()
-                        self.ax_s11.grid(True, alpha=0.5)
-                        
-                        # Mark center frequency
-                        cf = float(self.params["frequency"])
-                        self.ax_s11.axvline(x=cf, linestyle='--', alpha=0.7, color='red')
-                        self.ax_s11.text(cf, self.ax_s11.get_ylim()[1]*0.9, f'{cf} GHz', color='red')
-                        
-                except Exception as e:
-                    self.log_message(f"S11 plotting warning: {e}")
+            # VSWR via |S|
+            s_abs = 10 ** (s11_db / 20.0)
+            s_abs = np.clip(s_abs, 0, 0.999999)
+            vswr = (1 + s_abs) / (1 - s_abs)
+            ax_v = self.ax_s11.twinx()
+            ax_v.plot(f, vswr, linestyle='--', alpha=0.8, label='VSWR')
+            ax_v.set_ylabel("VSWR")
 
-            # ---------- Far-Field cuts ----------
+            # mínimo de S11
+            idx_min = int(np.argmin(s11_db))
+            f_res = float(f[idx_min]); s11_min_db = float(s11_db[idx_min])
+            self.ax_s11.scatter([f_res], [s11_min_db], s=45, marker="o", zorder=5)
+            self.ax_s11.annotate(f"f_res={f_res:.4g} GHz\nS11={s11_min_db:.2f} dB",
+                                 (f_res, s11_min_db), textcoords="offset points", xytext=(8, -16))
+            cf = float(self.params["frequency"])
+            self.ax_s11.axvline(x=cf, linestyle=':', alpha=0.7, color='r', label=f"f0={cf:g} GHz")
+
+            # Impedância |Z|
+            Zmag = None; R = X = None
+            if reS is not None and imS is not None and reS.size == imS.size == f.size:
+                S = reS + 1j*imS
+                Z0 = 50.0
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    Z = Z0 * (1 + S) / (1 - S)
+                Zmag = np.abs(Z)
+                self.ax_imp.plot(f, Zmag, linewidth=2)
+                self.ax_imp.set_xlabel("Frequency (GHz)")
+                self.ax_imp.set_ylabel("|Z| (Ω)")
+                self.ax_imp.set_title("Input Impedance Magnitude")
+                self.ax_imp.grid(True, alpha=0.5)
+                Zr = Z[idx_min]
+                R = float(np.real(Zr)); X = float(np.imag(Zr))
+
+            # guarda
+            self.last_s11_analysis = {"f": f, "s11_db": s11_db, "vswr": vswr,
+                                      "Zmag": Zmag, "f_res": f_res,
+                                      "R": R, "X": X}
+
+            if R is not None and X is not None:
+                self.result_label.configure(text=f"Min @ {f_res:.4g} GHz, S11={s11_min_db:.2f} dB, Z≈{R:.1f} + j{X:.1f} Ω")
+            else:
+                self.result_label.configure(text=f"Min @ {f_res:.4g} GHz, S11={s11_min_db:.2f} dB")
+
+            # Desenha (mantém cortes atuais)
+            self.canvas.draw()
+        except Exception as e:
+            self.log_message(f"Analyze S11 error: {e}\nTraceback: {traceback.format_exc()}")
+
+    # ------------- Padrões / 3D -------------
+    def refresh_patterns_only(self):
+        """Atualiza cortes theta/phi e superfície 3D com base na solução atual."""
+        try:
+            # limpa e redesenha cortes
+            self.ax_th.clear(); self.ax_ph.clear(); self.ax_3d.clear()
+
             f0 = float(self.params["frequency"])
 
-            # Theta cut (Phi = 0°)
             th, gth = self._get_gain_cut(f0, cut="theta", fixed_angle_deg=0.0)
-            if th is not None and gth is not None and len(th) == len(gth) and len(th) > 0:
-                # Plot original data if available
-                if hasattr(self, 'original_theta_data') and self.original_theta_data is not None:
-                    orig_th, orig_gth = self.original_theta_data
-                    self.ax_eplane.plot(orig_th, orig_gth, '--', label='Original', linewidth=2, alpha=0.7)
-                
-                # Plot current data
-                label = 'Optimized' if self.optimized else 'Simulated'
-                if self.optimized and len(self.optimization_history) > 0:
-                    label += f' (Iteration {len(self.optimization_history)})'
-                
-                self.ax_eplane.plot(th, gth, label=label, linewidth=2)
-                self.ax_eplane.set_xlabel("Theta (deg)")
-                self.ax_eplane.set_ylabel("Gain (dB)")
-                self.ax_eplane.set_title("Radiation Pattern - Theta cut (Phi = 0°)")
-                self.ax_eplane.legend()
-                self.ax_eplane.grid(True, alpha=0.5)
-                
-                # Store for future comparison
-                if not self.optimized:
-                    self.original_theta_data = (th, gth)
+            if th is not None and gth is not None:
+                self.theta_cut = (th, gth)
+                self.ax_th.plot(th, gth, linewidth=2)
+                self.ax_th.set_xlabel("Theta (deg)"); self.ax_th.set_ylabel("Gain (dB)")
+                self.ax_th.set_title("Radiation Pattern - Theta cut (Phi=0°)")
+                self.ax_th.grid(True, alpha=0.5)
             else:
-                self.ax_eplane.text(0.5, 0.5, "Theta-cut gain not available",
-                                transform=self.ax_eplane.transAxes, ha="center", va="center")
+                self.ax_th.text(0.5, 0.5, "Theta-cut gain not available",
+                                transform=self.ax_th.transAxes, ha="center", va="center")
 
-            # Phi cut (Theta = 90°)
             ph, gph = self._get_gain_cut(f0, cut="phi", fixed_angle_deg=90.0)
-            if ph is not None and gph is not None and len(ph) == len(gph) and len(ph) > 0:
-                # Plot original data if available
-                if hasattr(self, 'original_phi_data') and self.original_phi_data is not None:
-                    orig_ph, orig_gph = self.original_phi_data
-                    self.ax_hplane.plot(orig_ph, orig_gph, '--', label='Original', linewidth=2, alpha=0.7)
-                
-                # Plot current data
-                label = 'Optimized' if self.optimized else 'Simulated'
-                if self.optimized and len(self.optimization_history) > 0:
-                    label += f' (Iteration {len(self.optimization_history)})'
-                
-                self.ax_hplane.plot(ph, gph, label=label, linewidth=2)
-                self.ax_hplane.set_xlabel("Phi (deg)")
-                self.ax_hplane.set_ylabel("Gain (dB)")
-                self.ax_hplane.set_title("Radiation Pattern - Phi cut (Theta = 90°)")
-                self.ax_hplane.legend()
-                self.ax_hplane.grid(True, alpha=0.5)
-                
-                # Store for future comparison
-                if not self.optimized:
-                    self.original_phi_data = (ph, gph)
+            if ph is not None and gph is not None:
+                self.phi_cut = (ph, gph)
+                self.ax_ph.plot(ph, gph, linewidth=2)
+                self.ax_ph.set_xlabel("Phi (deg)"); self.ax_ph.set_ylabel("Gain (dB)")
+                self.ax_ph.set_title("Radiation Pattern - Phi cut (Theta=90°)")
+                self.ax_ph.grid(True, alpha=0.5)
             else:
-                self.ax_hplane.text(0.5, 0.5, "Phi-cut gain not available",
-                                transform=self.ax_hplane.transAxes, ha="center", va="center")
+                self.ax_ph.text(0.5, 0.5, "Phi-cut gain not available",
+                                transform=self.ax_ph.transAxes, ha="center", va="center")
 
-            # Finalize plot
-            self.fig_imp.tight_layout()
-            self.canvas_imp.draw()
-            self.log_message("Results plotted successfully")
-            
-            # Store original simulation data if this is the first run
-            if not self.optimized and self.simulation_data is not None:
-                self.original_simulation_data = self.simulation_data.copy()
-            
+            # 3D
+            grid = self._get_gain_3d_grid(f0, theta_step=self.params["theta_step"], phi_step=self.params["phi_step"])
+            if grid is not None:
+                TH_deg, PH_deg, Gdb = grid  # shapes (Nt, Np)
+                self.grid3d = grid
+                TH = np.deg2rad(TH_deg)[:, None] * np.ones((1, Gdb.shape[1]))
+                PH = np.deg2rad(PH_deg)[None, :] * np.ones((Gdb.shape[0], 1))
+                # raio proporcional ao ganho linear normalizado
+                Glin = 10 ** (Gdb / 20.0)
+                Glin = Glin - np.min(Glin)
+                if np.max(Glin) > 0:
+                    Glin = Glin / np.max(Glin)
+                R = 0.2 + 0.8 * Glin
+                X = R * np.sin(TH) * np.cos(PH)
+                Y = R * np.sin(TH) * np.sin(PH)
+                Z = R * np.cos(TH)
+                self.ax_3d.plot_surface(X, Y, Z, rstride=1, cstride=1, linewidth=0, antialiased=True,
+                                        cmap=cm.jet, shade=True)
+                self.ax_3d.set_title("3D Gain Pattern (normalized)")
+                self.ax_3d.set_axis_off()
+            else:
+                self.ax_3d.text2D(0.5, 0.5, "3D pattern not available", transform=self.ax_3d.transAxes, ha="center", va="center")
+
+            self.fig.tight_layout()
+            self.canvas.draw()
+            self.log_message("Patterns refreshed.")
         except Exception as e:
-            self.log_message(f"Error plotting results: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Refresh patterns error: {e}\nTraceback: {traceback.format_exc()}")
 
+    # ------------- Beamforming UI -------------
+    def populate_source_controls(self, excitations: List[str]):
+        """(Re)constrói controles de potência/fase por porta para *beamforming*."""
+        for child in self.src_frame.winfo_children():
+            child.destroy()
+        self.source_controls.clear()
+
+        if not excitations:
+            ctk.CTkLabel(self.src_frame, text="No excitations found.").pack(padx=8, pady=6)
+            return
+
+        head = ctk.CTkFrame(self.src_frame); head.pack(fill="x", padx=8, pady=4)
+        ctk.CTkLabel(head, text="Beamforming & Refresh", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        grid = ctk.CTkFrame(self.src_frame); grid.pack(fill="x", padx=8, pady=6)
+
+        # cabeçalhos
+        ctk.CTkLabel(grid, text="Port", width=120).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ctk.CTkLabel(grid, text="Power (W)", width=120).grid(row=0, column=1, padx=4, pady=4)
+        ctk.CTkLabel(grid, text="Phase (deg)", width=300).grid(row=0, column=2, padx=4, pady=4)
+
+        for i, ex in enumerate(excitations, start=1):
+            row = i
+            ctk.CTkLabel(grid, text=ex.split(":")[0], width=120).grid(row=row, column=0, padx=4, pady=3, sticky="w")
+            p_entry = ctk.CTkEntry(grid, width=100); p_entry.insert(0, "1.0")
+            p_entry.grid(row=row, column=1, padx=4, pady=3)
+            phase_slider = ctk.CTkSlider(grid, from_=0, to=360, number_of_steps=360)
+            phase_slider.set(0); phase_slider.grid(row=row, column=2, padx=6, pady=6, sticky="ew")
+            grid.grid_columnconfigure(2, weight=1)
+            self.source_controls[ex] = {"power": p_entry, "phase": phase_slider}
+
+    def apply_sources_from_ui(self):
+        """Lê controles de UI e redefine p_i/ph_i + *EditSources*; atualiza padrões."""
+        try:
+            exs = self._list_excitations()
+            if not exs:
+                self.log_message("No excitations to apply.")
+                return
+            pvars, phvars = [], []
+            for i, ex in enumerate(exs, start=1):
+                ctrl = self.source_controls.get(ex)
+                if not ctrl:
+                    continue
+                try:
+                    pw = float(ctrl["power"].get())
+                except Exception:
+                    pw = 1.0
+                ph = float(ctrl["phase"].get())
+                self._add_or_set_post_var(f"p{i}", f"{pw}W")
+                self._add_or_set_post_var(f"ph{i}", f"{ph}deg")
+                pvars.append(f"p{i}"); phvars.append(f"ph{i}")
+            self._edit_sources_with_vars(exs, pvars, phvars)
+            self.refresh_patterns_only()
+        except Exception as e:
+            self.log_message(f"Apply sources error: {e}\nTraceback: {traceback.format_exc()}")
+
+    def toggle_auto_refresh(self):
+        if self.auto_refresh_var.get():
+            self.schedule_auto_refresh()
+        else:
+            if self.auto_refresh_job:
+                try:
+                    self.window.after_cancel(self.auto_refresh_job)
+                except Exception:
+                    pass
+                self.auto_refresh_job = None
+
+    def schedule_auto_refresh(self):
+        self.refresh_patterns_only()
+        if self.auto_refresh_var.get():
+            self.auto_refresh_job = self.window.after(1500, self.schedule_auto_refresh)
+
+    # ------------- Exportações -------------
+    def export_csv(self):
+        """Exporta S11 (f, dB) para CSV."""
+        try:
+            if self.last_s11_analysis:
+                f = self.last_s11_analysis["f"]; s11 = self.last_s11_analysis["s11_db"]
+                np.savetxt("simulation_results.csv", np.column_stack((f, s11)),
+                           delimiter=",", header="Frequency (GHz), S11 (dB)", comments='')
+                self.log_message("Data exported to simulation_results.csv")
+            else:
+                self.log_message("Run 'Analyze S11' first.")
+        except Exception as e:
+            self.log_message(f"Error exporting CSV: {e}")
+
+    def export_png(self):
+        """Exporta *figure* atual para PNG de alta resolução."""
+        try:
+            if hasattr(self, 'fig'):
+                self.fig.savefig("simulation_results.png", dpi=300, bbox_inches='tight')
+                self.log_message("Plot saved to simulation_results.png")
+        except Exception as e:
+            self.log_message(f"Error saving plot: {e}")
     # ------------- Cleanup -------------
     def cleanup(self):
-        """Clean up resources."""
+        """Fecha projeto/desktop e limpa temporários com segurança."""
         try:
             if self.hfss:
                 try:
                     if self.save_project:
                         self.hfss.save_project()
+                        self.log_message(f"Project saved: {self.project_path}")
                     else:
                         self.hfss.close_project(save=False)
+                        self.log_message("Project closed without saving.")
                 except Exception as e:
-                    self.log_message(f"Error closing project: {e}")
-                    
+                    self.log_message(f"Error closing/saving project: {e}")
             if self.desktop:
                 try:
+                    # Mantém o Desktop aberto apenas se necessário; aqui liberamos.
                     self.desktop.release_desktop(close_projects=False, close_on_exit=False)
+                    self.log_message("AEDT Desktop released.")
                 except Exception as e:
                     self.log_message(f"Error releasing desktop: {e}")
-                    
             if self.temp_folder and not self.save_project:
                 try:
                     self.temp_folder.cleanup()
+                    self.log_message("Temporary folder cleaned.")
                 except Exception as e:
-                    self.log_message(f"Error cleaning up temporary files: {e}")
-                    
+                    self.log_message(f"Error cleaning temp files: {e}")
         except Exception as e:
             self.log_message(f"Error during cleanup: {e}")
 
     def on_closing(self):
-        """Handle window closing event."""
+        """Callback de fechamento da janela."""
         self.log_message("Application closing...")
-        self.cleanup()
-        self.window.quit()
-        self.window.destroy()
+        try:
+            self.cleanup()
+        finally:
+            try:
+                self.window.quit()
+            except Exception:
+                pass
+            try:
+                self.window.destroy()
+            except Exception:
+                pass
 
+    # ------------- Persistência -------------
     def save_parameters(self):
-        """Save parameters to JSON file."""
+        """Salva parâmetros (usuário + calculados) em JSON."""
         try:
             all_params = {**self.params, **self.calculated_params}
-            with open("antenna_parameters.json", "w") as f:
-                json.dump(all_params, f, indent=4)
+            with open("antenna_parameters.json", "w", encoding="utf-8") as f:
+                json.dump(all_params, f, indent=4, ensure_ascii=False)
             self.log_message("Parameters saved to antenna_parameters.json")
         except Exception as e:
             self.log_message(f"Error saving parameters: {e}")
 
     def load_parameters(self):
-        """Load parameters from JSON file."""
+        """Carrega parâmetros de JSON e atualiza UI."""
         try:
-            with open("antenna_parameters.json", "r") as f:
+            with open("antenna_parameters.json", "r", encoding="utf-8") as f:
                 all_params = json.load(f)
-                
             for k in self.params:
                 if k in all_params:
                     self.params[k] = all_params[k]
-                    
             for k in self.calculated_params:
                 if k in all_params:
                     self.calculated_params[k] = all_params[k]
-                    
             self.update_interface_from_params()
             self.log_message("Parameters loaded from antenna_parameters.json")
-            
+        except FileNotFoundError:
+            self.log_message("antenna_parameters.json not found.")
         except Exception as e:
             self.log_message(f"Error loading parameters: {e}")
 
     def update_interface_from_params(self):
-        """Update GUI with loaded parameters."""
+        """Reflete `self.params` e `self.calculated_params` nos widgets e rótulos."""
         try:
             for key, widget in self.entries:
                 if key in self.params:
+                    val = self.params[key]
+                    # Widgets armazenados são: CTkEntry OU StringVar/BooleanVar
                     if isinstance(widget, ctk.CTkEntry):
                         widget.delete(0, "end")
-                        widget.insert(0, str(self.params[key]))
+                        widget.insert(0, str(val))
                     elif isinstance(widget, ctk.StringVar):
-                        widget.set(self.params[key])
+                        widget.set(val)
                     elif isinstance(widget, ctk.BooleanVar):
-                        widget.set(self.params[key])
-                        
-            # Update calculated parameters display
+                        # 'show_gui' controla 'non_graphical' (inverso)
+                        if key == "show_gui":
+                            widget.set(not self.params["non_graphical"])
+                        else:
+                            widget.set(bool(val))
+
             self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
-            self.rows_cols_label.configure(
-                text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}"
-            )
+            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
             self.spacing_label.configure(
                 text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})"
             )
@@ -2390,18 +1406,22 @@ class ModernPatchAntennaDesigner:
                 text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x "
                      f"{self.calculated_params['substrate_length']:.2f} mm"
             )
-            
             self.log_message("Interface updated with loaded parameters")
-            
         except Exception as e:
             self.log_message(f"Error updating interface: {e}")
 
+    # ------------- Execução da App -------------
     def run(self):
-        """Run the application."""
+        """Inicia o *mainloop* e garante *cleanup* ao sair."""
         try:
+            self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
             self.window.mainloop()
         finally:
-            self.cleanup()
+            # Se o usuário matar a janela abruptamente, ainda tentamos limpar.
+            try:
+                self.cleanup()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
