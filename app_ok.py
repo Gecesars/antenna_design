@@ -602,26 +602,31 @@ class ModernPatchAntennaDesigner:
         self.ax_hplane = self.fig_rad.add_subplot(2, 2, 3)
         self.ax_3d = self.fig_rad.add_subplot(2, 2, 4, projection='3d')
         
-        # Style the axes
-        for ax in [self.ax_2d, self.ax_eplane, self.ax_hplane, self.ax_3d]:
-            if hasattr(ax, 'set_facecolor'):
-                ax.set_facecolor(face)
+        # Style the axes - only for Cartesian axes, not polar or 3D
+        for ax in [self.ax_eplane, self.ax_hplane]:
+            ax.set_facecolor(face)
             if ctk.get_appearance_mode() == "Dark":
-                if hasattr(ax, 'tick_params'):
-                    ax.tick_params(colors='white')
-                if hasattr(ax, 'xaxis'):
-                    ax.xaxis.label.set_color('white')
-                if hasattr(ax, 'yaxis'):
-                    ax.yaxis.label.set_color('white')
-                if hasattr(ax, 'title'):
-                    ax.title.set_color('white')
-                if hasattr(ax, 'set_zlabel'):
-                    ax.zaxis.label.set_color('white')
+                ax.tick_params(colors='white')
+                ax.xaxis.label.set_color('white')
+                ax.yaxis.label.set_color('white')
+                ax.title.set_color('white')
                 for s in ['bottom', 'top', 'right', 'left']:
-                    if hasattr(ax, 'spines'):
-                        ax.spines[s].set_color('white')
-                if hasattr(ax, 'grid'):
-                    ax.grid(color='gray', alpha=0.5)
+                    ax.spines[s].set_color('white')
+                ax.grid(color='gray', alpha=0.5)
+        
+        # Style polar plot separately
+        if ctk.get_appearance_mode() == "Dark":
+            self.ax_2d.tick_params(colors='white')
+            self.ax_2d.title.set_color('white')
+            self.ax_2d.grid(color='gray', alpha=0.5)
+        
+        # Style 3D plot separately
+        if ctk.get_appearance_mode() == "Dark":
+            self.ax_3d.tick_params(colors='white')
+            self.ax_3d.xaxis.label.set_color('white')
+            self.ax_3d.yaxis.label.set_color('white')
+            self.ax_3d.zaxis.label.set_color('white')
+            self.ax_3d.title.set_color('white')
         
         # Set titles
         self.ax_2d.set_title("2D Radiation Pattern (Polar)")
@@ -656,7 +661,7 @@ class ModernPatchAntennaDesigner:
         ctk.CTkLabel(control_frame, text="GHz").pack(side="left", padx=2)
         
         ctk.CTkButton(control_frame, text="Update Patterns", command=self.update_radiation_patterns, 
-                     width=120).pack(side="left", padx=10)
+                    width=120).pack(side="left", padx=10)
 
     def setup_log_tab(self):
         tab = self.tabview.tab("Log")
