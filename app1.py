@@ -1231,4 +1231,5 @@ class ModernPatchAntennaDesigner:
 
 if __name__ == "__main__":
     app = ModernPatchAntennaDesigner()
+
     app.run()
