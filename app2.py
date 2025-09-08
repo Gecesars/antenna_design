@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- este código precisa de partes de app3
 import os
 import tempfile
 import time

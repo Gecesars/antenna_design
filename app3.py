@@ -999,53 +999,94 @@ class ModernPatchAntennaDesigner:
             self.log_message(f"Traceback: {traceback.format_exc()}")
             return None, None, None
 
+
+    def _ensure_post_vars_for_excitations(self, excitations: List[str],
+                                        default_mag: str = "1V",
+                                        default_phase: str = "0deg") -> Tuple[List[str], List[str]]:
+        """Para cada porta, garante p{i} e ph{i} como variáveis de design (idempotente).
+        Retorna as listas de nomes a serem referenciadas no EditSources.
+        """
+        pvars, phvars = [], []
+        for i, _ in enumerate(excitations, start=1):
+            p_name = f"p{i}"
+            ph_name = f"ph{i}"
+
+            if not self._set_design_variable(p_name, default_mag, overwrite=False):
+                # fallback: usa literal se der erro ao criar variável
+                p_name = default_mag
+
+            if not self._set_design_variable(ph_name, default_phase, overwrite=False):
+                ph_name = default_phase
+
+            pvars.append(p_name)
+            phvars.append(ph_name)
+
+        return pvars, phvars
+
+
+
+
     # ---------- Post-solve helpers ----------
-    def _add_post_var(self, name: str, value: str):
-        """Create a post-processing variable."""
+    def _set_design_variable(self, name: str, value: str, overwrite: bool = False) -> bool:
+        """Garante uma variável de design (local) com valor e unidades corretas.
+        Usa o mecanismo padrão do AEDT/HFSS (design variables), que são visíveis ao pós-processamento.
+        """
         try:
-            props = [
-                "NAME:AllTabs",
-                [
-                    "NAME:LocalVariableTab",
-                    ["NAME:PropServers", "LocalVariables"],
-                    [
-                        "NAME:NewProps",
-                        [
-                            f"NAME:{name}",
-                            "PropType:=", "PostProcessingVariableProp",
-                            "UserDef:=", True,
-                            "Value:=", value
-                        ]
-                    ]
-                ]
-            ]
-            self.hfss.odesign.ChangeProperty(props)
+            try:
+                existing = set(self.hfss.odesign.GetVariables())
+            except Exception:
+                existing = set()
+
+            if (name in existing) and not overwrite:
+                self.log_message(f"Design variable já existe: {name} (mantida)")
+                return True
+
+            # Define/atualiza a variável como variável de design
+            self.hfss[name] = value  # ex.: "1V", "0deg"
+            self.log_message(f"Design variable definida: {name} = {value}")
             return True
         except Exception as e:
-            self.log_message(f"Add post var '{name}' failed: {e}")
+            self.log_message(f"Falha ao definir variável '{name}': {e}")
             return False
 
-    def _edit_sources_with_vars(self, excitations: List[str], pvars: List[str], phvars: List[str]):
-        """Apply Solutions.EditSources using p_i and ph_i variables."""
+
+    def _edit_sources_with_vars(self, excitations: List[str], pvars: List[str], phvars: List[str]) -> bool:
+        """Aplica magnitude/fase em cada excitação usando as variáveis p{i}/ph{i}.
+        Prefere a API de alto nível do PyAEDT; se indisponível, usa o COM com a estrutura correta.
+        """
         try:
+            # 1) Tente a API de alto nível (PyAEDT >= 0.8 aprox.)
+            if hasattr(self.hfss, "edit_sources"):
+                ok = self.hfss.edit_sources(source_names=excitations,
+                                            magnitudes=pvars,
+                                            phases=phvars)
+                if ok:
+                    self.log_message("EditSources aplicado via API PyAEDT.")
+                    return True
+
+            # 2) Fallback COM nativo com a sintaxe correta
             sol = self.hfss.odesign.GetModule("Solutions")
-            header = ["IncludePortPostProcessing:=", False, "SpecifySystemPower:=", False]
-            cmd = [header]
-            
-            for ex, p, ph in zip(excitations, pvars, phvars):
-                cmd.append([
-                    "Name:=", ex,
-                    "Magnitude:=", p,
-                    "Phase:=", ph
-                ])
-                
-            sol.EditSources(cmd)
-            self.log_message("Solutions.EditSources applied with post variables.")
+            # Cabeçalho
+            args = ["IncludePortPostProcessing:=", False, "SpecifySystemPower:=", False]
+            # Bloco de fontes
+            sources_block = ["NAME:Sources"]
+            for name, mag, ph in zip(excitations, pvars, phvars):
+                # Estrutura esperada: ["NAME:Source", "Name:=", <porta>, "Magnitude:=", <expr>, "Phase:=", <expr>, "UseMagPhase:=", True]
+                sources_block.append(["NAME:Source",
+                                    "Name:=", name,
+                                    "Magnitude:=", mag,
+                                    "Phase:=", ph,
+                                    "UseMagPhase:=", True])
+
+            sol.EditSources(args + [sources_block])
+            self.log_message("EditSources aplicado via COM nativo.")
             return True
-            
+
         except Exception as e:
-            self.log_message(f"EditSources failed: {e}")
+            self.log_message(f"EditSources falhou: {e}")
+            self.log_message(f"Traceback: {traceback.format_exc()}")
             return False
+
 
     def _create_infinite_sphere_after(self, name="Infinite Sphere1"):
         """Create an infinite sphere for far-field analysis."""
@@ -1074,45 +1115,31 @@ class ModernPatchAntennaDesigner:
             return None
 
     def _postprocess_after_solve(self):
-        """Perform post-processing after simulation completes."""
+        """Pós-processamento: garante variáveis p{i}/ph{i}, aplica EditSources e cria esfera infinita."""
         try:
-            # Get excitations
+            # 1) Portas/excitações do design
             try:
                 exs = self.hfss.get_excitations_name() or []
             except Exception:
                 exs = []
-                
+
             if not exs:
-                self.log_message("No excitations found for post-processing.")
+                self.log_message("Nenhuma excitação encontrada para pós-processamento.")
                 return
 
-            # Create post variables
-            n = len(exs)
-            pvars = []
-            phvars = []
-            
-            for i in range(1, n + 1):
-                p = f"p{i}"
-                ph = f"ph{i}"
-                
-                if self._add_post_var(p, "1W"):
-                    pvars.append(p)
-                else:
-                    pvars.append("1W")
-                    
-                if self._add_post_var(ph, "0deg"):
-                    phvars.append(ph)
-                else:
-                    phvars.append("0deg")
+            # 2) Garante p{i}/ph{i} como variáveis de design (1V / 0deg por padrão)
+            pvars, phvars = self._ensure_post_vars_for_excitations(exs, default_mag="1V", default_phase="0deg")
 
-            # Edit sources with variables
+            # 3) Aplica as variáveis nas fontes
             self._edit_sources_with_vars(exs, pvars, phvars)
 
-            # Create infinite sphere
+            # 4) Garante esfera infinita para FF (mantém seu nome e varreduras)
             self._create_infinite_sphere_after(name="Infinite Sphere1")
-            
+
         except Exception as e:
-            self.log_message(f"Postprocess-after-solve error: {e}")
+            self.log_message(f"Erro no pós-processamento: {e}")
+            self.log_message(f"Traceback: {traceback.format_exc()}")
+
 
     # ------------- Far Field Analysis -------------
     def _get_gain_cut(self, frequency: float, cut: str, fixed_angle_deg: float):
