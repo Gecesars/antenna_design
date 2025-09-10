@@ -1393,4 +1393,462 @@ class ModernPatchAntennaDesigner:
                     TH_list = th
                 else:
                     if th.size != TH_list.size:
-                        # ignora phi
+                        # ignora phi com vetor de theta inconsistente
+                        continue
+                G_list.append(g)
+            if TH_list is None or len(G_list) == 0:
+                return None
+            G = np.vstack(G_list).T  # shape (Ntheta, Nphi)
+            PH = phi_vals[:G.shape[1]]
+            TH = TH_list
+            return TH, PH, G
+        except Exception as e:
+            self.log_message(f"3D grid error: {e}")
+            return None
+
+    # ------------- Otimização de Ressonância S11 -------------
+    def analyze_and_optimize(self):
+        """Analisa a ressonância S11 e otimiza a geometria se necessário."""
+        if self.last_s11_analysis is None:
+            self.log_message("No S11 data available for optimization")
+            messagebox.showerror("Error", "No S11 data available. Please run a simulation first.")
+            return
+            
+        try:
+            # Obter dados da análise S11
+            f = self.last_s11_analysis["f"]
+            s11_db = self.last_s11_analysis["s11_db"]
+            f_res = self.last_s11_analysis["f_res"]
+            target_freq = self.params["frequency"]
+            
+            # Calcular erro percentual
+            error_percent = abs(f_res - target_freq) / target_freq * 100
+            
+            # Mensagem de análise detalhada
+            analysis_msg = f"Frequency Analysis Results:\n\n"
+            analysis_msg += f"Target Frequency: {target_freq:.3f} GHz\n"
+            analysis_msg += f"Measured Resonance: {f_res:.3f} GHz\n"
+            analysis_msg += f"Frequency Error: {error_percent:.1f}%\n"
+            analysis_msg += f"Minimum S11: {min(s11_db):.2f} dB\n\n"
+            
+            if error_percent < 2:  # Menos de 2% de erro
+                analysis_msg += "✅ Design is within acceptable tolerance (≤2% error)."
+                messagebox.showinfo("Frequency Analysis", analysis_msg)
+                return
+                
+            # Calcular fator de ajuste
+            scaling_factor = target_freq / f_res
+            
+            if scaling_factor < 1:
+                size_change = "decrease"
+                freq_direction = "increase"
+            else:
+                size_change = "increase"
+                freq_direction = "decrease"
+            
+            analysis_msg += f"Recommended adjustment: {size_change} size by factor {scaling_factor:.3f}\n"
+            analysis_msg += f"to {freq_direction} resonant frequency toward target."
+            
+            # Perguntar ao usuário se deseja otimizar
+            response = messagebox.askyesno("Frequency Optimization", 
+                                          analysis_msg + "\n\nWould you like to optimize the design?")
+            
+            if not response:
+                return
+                
+            # Armazenar parâmetros originais para comparação se esta for a primeira otimização
+            if not self.optimized:
+                self.original_params = self.calculated_params.copy()
+                self.optimization_history = []
+            
+            # Registrar esta etapa de otimização
+            optimization_step = {
+                "iteration": len(self.optimization_history) + 1,
+                "resonant_freq": f_res,
+                "target_freq": target_freq,
+                "error_percent": error_percent,
+                "min_s11": min(s11_db),
+                "scaling_factor": scaling_factor,
+                "size_change": size_change
+            }
+            self.optimization_history.append(optimization_step)
+            
+            self.log_message(f"Optimizing design with scaling factor: {scaling_factor:.4f}")
+            self.log_message(f"Size change: {size_change}")
+            
+            # Aplicar scaling a todas as dimensões
+            dimension_keys = ["patch_length", "patch_width", "spacing", "feed_offset", 
+                             "substrate_width", "substrate_length"]
+            
+            for key in dimension_keys:
+                self.calculated_params[key] *= scaling_factor
+                
+            # Atualizar comprimento de onda guiado
+            self.calculated_params["lambda_g"] *= scaling_factor
+                
+            # Atualizar UI com novas dimensões
+            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
+            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
+            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
+            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
+            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
+            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
+            self.substrate_dims_label.configure(
+                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
+            
+            # Definir flag otimizada
+            self.optimized = True
+            self.opt_status_label.configure(text=f"Optimized - Iteration {len(self.optimization_history)}")
+            
+            # Perguntar se o usuário deseja executar a simulação com as novas dimensões
+            response = messagebox.askyesno("Run Optimization", 
+                                          "Design parameters have been adjusted. Would you like to run the simulation with the optimized dimensions?")
+            
+            if response:
+                self.run_simulation()
+                
+        except Exception as e:
+            self.log_message(f"Error in frequency optimization: {e}")
+            self.log_message(f"Traceback: {traceback.format_exc()}")
+            messagebox.showerror("Error", f"Optimization failed: {e}")
+            self.update_quick_status("Error", "error")
+
+    def reset_to_original(self):
+        """Redefine o design para os parâmetros originais."""
+        if not self.optimized:
+            messagebox.showinfo("Reset", "Design is already at original parameters.")
+            return
+            
+        response = messagebox.askyesno("Reset Design", 
+                                      "Are you sure you want to reset all parameters to their original values?")
+        
+        if response:
+            # Restaurar parâmetros originais
+            for key in self.original_params:
+                self.calculated_params[key] = self.original_params[key]
+                
+            # Atualizar UI
+            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
+            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
+            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
+            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
+            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
+            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
+            self.substrate_dims_label.configure(
+                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
+            
+            # Redefinir flags
+            self.optimized = False
+            self.optimization_history = []
+            self.opt_status_label.configure(text="No optimization performed yet")
+            
+            self.log_message("Design reset to original parameters")
+            messagebox.showinfo("Reset Complete", "Design parameters have been reset to their original values.")
+
+    # ------------- Simulação -------------
+    def _run_simulation_thread(self):
+        """Executa a simulação em uma thread separada para não travar a GUI."""
+        try:
+            self.log_message("Starting simulation thread")
+            if not self.get_parameters():
+                self.log_message("Invalid parameters. Aborting.")
+                return
+            if self.calculated_params["num_patches"] < 1:
+                self.calculate_parameters()
+
+            self._open_or_create_project()
+
+            self.hfss.modeler.model_units = "mm"
+            self.log_message("Model units set to: mm")
+
+            sub_name = self.params["substrate_material"]
+            if not self.hfss.materials.checkifmaterialexists(sub_name):
+                sub_name = "Custom_Substrate"
+                self._ensure_material(sub_name, float(self.params["er"]), float(self.params["tan_d"]))
+
+            L = float(self.calculated_params["patch_length"])
+            W = float(self.calculated_params["patch_width"])
+            spacing = float(self.calculated_params["spacing"])
+            rows = int(self.calculated_params["rows"])
+            cols = int(self.calculated_params["cols"])
+            h_sub = float(self.params["substrate_thickness"])
+            sub_w = float(self.calculated_params["substrate_width"])
+            sub_l = float(self.calculated_params["substrate_length"])
+
+            self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
+            self.created_ports.clear()
+
+            self.log_message("Creating substrate")
+            substrate = self.hfss.modeler.create_box(["-subW/2", "-subL/2", 0], ["subW", "subL", "h_sub"], "Substrate", sub_name)
+            self.log_message("Creating ground plane")
+            ground = self.hfss.modeler.create_rectangle("XY", ["-subW/2", "-subL/2", 0], ["subW", "subL"], "Ground", "copper")
+
+            self.log_message(f"Creating {rows*cols} patches in {rows}x{cols} configuration")
+            patches = []
+            total_w = cols * W + (cols - 1) * spacing
+            total_l = rows * L + (rows - 1) * spacing
+            start_x = -total_w / 2 + W / 2
+            start_y = -total_l / 2 + L / 2
+
+            count = 0
+            for r in range(rows):
+                for c in range(cols):
+                    count += 1
+                    patch_name = f"Patch_{count}"
+                    cx = start_x + c * (W + spacing)
+                    cy = start_y + r * (L + spacing)
+                    origin = [cx - W / 2, cy - L / 2, "h_sub"]
+                    self.log_message(f"Creating patch {count} at ({r}, {c})")
+                    patch = self.hfss.modeler.create_rectangle("XY", origin, ["patchW", "patchL"], patch_name, "copper")
+                    patches.append(patch)
+
+                    if self.params["feed_position"] == "edge":
+                        y_feed = cy - 0.5 * L + 0.02 * L
+                    else:
+                        y_feed = cy - 0.5 * L + 0.30 * L
+                    relx = float(self.params["feed_rel_x"])
+                    relx = min(max(relx, 0.0), 1.0)
+                    x_feed = cx - 0.5 * W + relx * W
+
+                    # Evitar criar pad com nome inválido
+                    pad_name = f"{patch_name}_Pad"
+                    pad_name = pad_name.replace(" ", "_")  # Garantir nome válido
+                    pad = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, "h_sub"], "a", pad_name, "copper")
+                    
+                    try:
+                        self.hfss.modeler.unite([patch, pad])
+                    except Exception as e:
+                        self.log_message(f"Warning: Could not unite patch and pad: {e}")
+                        # Continua mesmo sem unir
+
+                    self._create_coax_feed_lumped(ground=ground, substrate=substrate, x_feed=x_feed, y_feed=y_feed, name_prefix=f"P{count}")
+
+            try:
+                names = [ground.name] + [p.name for p in patches]
+                self.hfss.assign_perfecte_to_sheets(names)
+                self.log_message(f"PerfectE assigned to: {names}")
+            except Exception as e:
+                self.log_message(f"PerfectE assignment warning: {e}")
+
+            self.log_message("Creating air region + radiation boundary")
+            lambda0_mm = self.c / (self.params["sweep_start"] * 1e9) * 1000.0
+            pad_mm = float(lambda0_mm) / 4.0
+            region = self.hfss.modeler.create_region([pad_mm]*6, is_percentage=False)
+            self.hfss.assign_radiation_boundary_to_objects(region)
+
+            # Esfera antes do solve (para ter far-field)
+            self._ensure_infinite_sphere("Infinite Sphere1")
+
+            # Setup
+            self.log_message("Creating simulation setup")
+            setup = self.hfss.create_setup(name="Setup1", setup_type="HFSSDriven")
+            setup.props["Frequency"] = f"{self.params['frequency']}GHz"
+            setup.props["MaxDeltaS"] = 0.02
+            try:
+                setup.props["SaveFields"] = False
+                setup.props["SaveRadFields"] = True
+            except Exception:
+                pass
+
+            self.log_message(f"Creating frequency sweep: {self.params['sweep_type']}")
+            stype = self.params["sweep_type"]
+            try:
+                try:
+                    sw = setup.get_sweep("Sweep1")
+                    if sw:
+                        sw.delete()
+                except Exception:
+                    pass
+                if stype == "Discrete":
+                    step = float(self.params["sweep_step"])
+                    setup.create_linear_step_sweep(unit="GHz", start_frequency=self.params["sweep_start"],
+                                                   stop_frequency=self.params["sweep_stop"], step_size=step, name="Sweep1")
+                elif stype == "Fast":
+                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
+                                                 start_frequency=self.params["sweep_start"],
+                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Fast")
+                else:
+                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
+                                                 start_frequency=self.params["sweep_start"],
+                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Interpolating")
+            except Exception as e:
+                self.log_message(f"Sweep creation warning: {e}")
+
+            exs = self._list_excitations()
+            self.log_message(f"Excitations created: {len(exs)} -> {exs}")
+
+            self.log_message("Validating design")
+            try:
+                _ = self.hfss.validate_full_design()
+            except Exception as e:
+                self.log_message(f"Validation warning: {e}")
+
+            self.log_message("Starting analysis")
+            if self.save_project:
+                self.hfss.save_project()
+                
+            # Usar análise assíncrona com timeout
+            analysis_success = self.hfss.analyze_setup("Setup1", cores=self.params["cores"])
+            
+            if not analysis_success:
+                self.log_message("Analysis failed or timed out")
+                self.sim_status_label.configure(text="Simulation failed")
+                self.update_quick_status("Error", "error")
+                return
+
+            # Aguardar um pouco para garantir que os dados estejam disponíveis
+            time.sleep(2)
+
+            self._postprocess_after_solve()
+            self.log_message("Processing results")
+            
+            # Atualizar a interface na thread principal
+            self.window.after(0, self._update_after_simulation)
+            
+        except Exception as e:
+            self.log_message(f"Error in simulation: {e}\nTraceback: {traceback.format_exc()}")
+            self.sim_status_label.configure(text=f"Simulation error: {e}")
+            self.update_quick_status("Error", "error")
+        finally:
+            self.simulation_running = False
+            self.run_button.configure(state="normal")
+
+    def _update_after_simulation(self):
+        """Atualiza a interface após a simulação ser concluída."""
+        try:
+            self.analyze_and_mark_s11()     # também redesenha cortes
+            self.refresh_patterns_only()    # inclui 3D
+            self.sim_status_label.configure(text="Simulation completed")
+            self.log_message("Simulation completed successfully")
+            self.update_quick_status("Success", "success")
+        except Exception as e:
+            self.log_message(f"Error updating after simulation: {e}")
+
+    def run_simulation(self):
+        """Inicia a simulação em uma thread separada."""
+        if self.simulation_running:
+            self.log_message("Simulation is already running")
+            return
+            
+        self.simulation_running = True
+        self.run_button.configure(state="disabled")
+        self.sim_status_label.configure(text="Simulation in progress")
+        self.update_quick_status("Running...", "running")
+        
+        # Executar a simulação em uma thread separada
+        self.simulation_thread = threading.Thread(target=self._run_simulation_thread)
+        self.simulation_thread.daemon = True
+        self.simulation_thread.start()
+
+    # ------------- S11 / VSWR / |Z| -------------
+    def _get_s11_curves(self):
+        """Obtém f, S11(dB) and (opcional) re/im de S11 para cálculo de Z."""
+        exs = self._list_excitations()
+        if not exs:
+            return None
+        port_name = exs[0].split(":")[0]
+
+        # tentar por nome (compatível com portas nomeadas)
+        for expr_tpl in [f"( {port_name},{port_name} )", f"({port_name},{port_name})"]:
+            sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
+            if sd_db and hasattr(sd_db, "primary_sweep_values"):
+                f = np.asarray(sd_db.primary_sweep_values, dtype=float)
+                y_db = self._shape_series(sd_db.data_real(), f.size)
+                if y_db.size == f.size and f.size > 0:
+                    sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+                    sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+                    reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
+                    imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
+                    return f, y_db, reS, imS
+
+        # fallback por índice
+        expr_tpl = "(1,1)"
+        sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
+        if not sd_db:
+            return None
+        f = np.asarray(sd_db.primary_sweep_values, dtype=float)
+        y_db = self._shape_series(sd_db.data_real(), f.size)
+        sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+        sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
+        reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
+        imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
+        return f, y_db, reS, imS
+
+    def analyze_and_mark_s11(self):
+        """Plota S11 e VSWR; estima Z=50*(1+S)/(1-S) no mínimo de S11, se possível."""
+        try:
+            # Limpa S11/Imp
+            self.ax_s11.clear(); self.ax_imp.clear()
+
+            data = self._get_s11_curves()
+            if not data:
+                self.log_message("Solution Data failed to load. Check solution, context or expression.")
+                self.canvas_s11.draw(); return
+            f, s11_db, reS, imS = data
+            if f.size == 0 or s11_db.size == 0:
+                self.log_message("S11 analysis aborted: empty curve.")
+                self.canvas_s11.draw(); return
+
+            # S11 dB
+            # Plotar dados originais se disponíveis
+            if hasattr(self, 'original_s11_data') and self.original_s11_data is not None:
+                orig_f, orig_s11 = self.original_s11_data
+                self.ax_s11.plot(orig_f, orig_s11, '--', label='Original', linewidth=2, alpha=0.7)
+            
+            # Plotar dados atuais
+            label = 'Optimized' if self.optimized else 'Simulated'
+            if self.optimized and len(self.optimization_history) > 0:
+                label += f' (Iteration {len(self.optimization_history)})'
+            
+            self.ax_s11.plot(f, s11_db, linewidth=2, label=label)
+            self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
+            self.ax_s11.set_xlabel("Frequency (GHz)")
+            self.ax_s11.set_ylabel("S11 (dB)")
+            
+            title = "S11 & VSWR"
+            if self.optimized:
+                title += f" (Optimized - Iteration {len(self.optimization_history)})"
+            self.ax_s11.set_title(title)
+            
+            self.ax_s11.legend()
+            self.ax_s11.grid(True, alpha=0.5)
+
+            # VSWR via |S|
+            s_abs = 10 ** (s11_db / 20.0)
+            s_abs = np.clip(s_abs, 0, 0.999999)
+            vswr = (1 + s_abs) / (1 - s_abs)
+            ax_v = self.ax_s11.twinx()
+            ax_v.plot(f, vswr, linestyle='--', alpha=0.8, label='VSWR')
+            ax_v.set_ylabel("VSWR")
+
+            # mínimo de S11
+            idx_min = int(np.argmin(s11_db))
+            f_res = float(f[idx_min]); s11_min_db = float(s11_db[idx_min])
+            self.ax_s11.scatter([f_res], [s11_min_db], s=45, marker="o", zorder=5)
+            self.ax_s11.annotate(f"f_res={f_res:.4g} GHz\nS11={s11_min_db:.2f} dB",
+                                 (f_res, s11_min_db), textcoords="offset points", xytext=(8, -16))
+            cf = float(self.params["frequency"])
+            self.ax_s11.axvline(x=cf, linestyle=':', alpha=0.7, color='r', label=f"f0={cf:g} GHz")
+
+            # Impedância |Z|
+            Zmag = None; R = X = None
+            if reS is not None and imS is not None and reS.size == imS.size == f.size:
+                S = reS + 1j*imS
+                Z0 = 50.0
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    Z = Z0 * (1 + S) / (1 - S)
+                Zmag = np.abs(Z)
+                self.ax_imp.plot(f, Zmag, linewidth=2)
+                self.ax_imp.set_xlabel("Frequency (GHz)")
+                self.ax_imp.set_ylabel("|Z| (Ω)")
+                self.ax_imp.set_title("Input Impedance Magnitude")
+                self.ax_imp.grid(True, alpha=0.5)
+                Zr = Z[idx_min]
+                R = float(np.real(Zr)); X = float(np.imag(Zr))
+
+            # guarda
+            self.last_s11_analysis = {"f": f, "s11_db": s11_db, "vswr": vswr,
+                                      "Zmag": Zmag, "f_res": f_res,
+                                      "R": R, "X": X}
+
+            if R is not
