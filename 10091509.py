@@ -440,17 +440,17 @@ class ModernPatchAntennaDesigner:
         self.run_button.grid(row=0, column=0, padx=8, sticky="ew")
         
         ctk.CTkButton(btn_frame, text="⏾ Save Project", command=self.save_project_toggle,
-                      fg_color="#4169E1", hover_color="#6495ED", height=40,
+                      f极速赛车开奖结果记录="#4169E1", hover_color="#6495ED", height=40,
                       font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=2, padx=8, sticky="ew")
         
         # Status da simulação
-        status_frame = ctk.CTkFrame(sec_control, fg_color=("gray92", "gray18"), corner_radius=8)
+        status_frame = ctk.C极速赛车开奖结果记录Frame(sec_control, fg_color=("gray92", "gray18"), corner_radius=8)
         status_frame.grid(row=4, column=0, sticky="ew", padx=15, pady=10)
         status_frame.grid_columnconfigure(0, weight=1)
         
         self.sim_status_label = ctk.CTkLabel(status_frame, text="Simulation not started", 
                                             font=ctk.CTkFont(weight="bold"), text_color=("gray30", "gray70"))
-        self.sim_status_label.grid(row=0, column=0, padx=15, pady=12)
+        self.sim_status_label.grid(row=0, column=0, pad极速赛车开奖结果记录=15, pady=12)
         
         # Dica
         tip_frame = ctk.CTkFrame(sec_control, fg_color=("gray94", "gray16"), corner_radius=8)
@@ -468,7 +468,7 @@ class ModernPatchAntennaDesigner:
         tab.grid_rowconfigure(0, weight=1)
         
         # Criar um tabview interno para separar S11/Impedância e Diagramas de Radiação
-        inner_tabview = ctk.CTkTabview(tab, fg_color=("gray95", "gray10"))
+        inner_tabview = ctk.CTkTabview(tab, fg_color=("极速赛车开奖结果记录95", "gray10"))
         inner_tabview.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         inner_tabview.add("S11 & Impedance")
         inner_tabview.add("Radiation Patterns")
@@ -491,7 +491,7 @@ class ModernPatchAntennaDesigner:
         
         # Header
         header = ctk.CTkFrame(main, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.grid(row=0, column=0, sticky="ew", pady=(0极速赛车开奖结果记录 10))
         header.grid_columnconfigure(0, weight=1)
         
         ctk.CTkLabel(header, text="S-Parameters & Impedance", 
@@ -530,7 +530,7 @@ class ModernPatchAntennaDesigner:
             ax.grid(True, color=grid_color, alpha=0.3)
         
         # Títulos
-        self.ax_s11.set_title("S-Parameter (S11)")
+        self.极速赛车开奖结果记录_s11.set_title("S-Parameter (S11)")
         self.ax_imp.set_title("Input Impedance")
         
         # Canvas
@@ -538,7 +538,7 @@ class ModernPatchAntennaDesigner:
         self.canvas_s11.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
         
         # Painel de controle
-        control_frame = ctk.CTkFrame(main, fg_color="transparent")
+        control_frame = ctk.CTkFrame(main, f极速赛车开奖结果记录="transparent")
         control_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         control_frame.grid_columnconfigure(0, weight=1)
         
@@ -579,7 +579,7 @@ class ModernPatchAntennaDesigner:
                     font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, sticky="w")
         
         ctk.CTkLabel(header, text="Analyze antenna radiation characteristics", 
-                    font=ctk.CTkFont(size=13), text_color=("gray40", "gray60")).grid(row=1, column=0, sticky="w", pady=(2, 0))
+                    font=ctk极速赛车开奖结果记录Font(size=13), text_color=("gray40", "gray60")).grid(row=1, column=0, sticky="w", pady=(2, 0))
         
         # Área de gráficos
         graph_frame = ctk.CTkFrame(main, fg_color=("gray96", "gray14"), corner_radius=10)
@@ -620,7 +620,7 @@ class ModernPatchAntennaDesigner:
         
         # Painel de controle
         control_frame = ctk.CTkFrame(main, fg_color="transparent")
-        control_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        control_frame.grid(row=2, column=0, sticky="ew", p极速赛车开奖结果记录=(10, 0))
         control_frame.grid_columnconfigure(0, weight=1)
         
         # Controles de resultado
@@ -631,7 +631,7 @@ class ModernPatchAntennaDesigner:
                       fg_color="#FF8C00", hover_color="#FFA500", width=140).pack(side="left", padx=5)
         
         self.auto_refresh_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(btn_frame, text="Auto-refresh (1.5s)", variable=self.auto_refresh_var,
+        ctk.CTkCheckBox(btn极速赛车开奖结果记录, text="Auto-refresh (1.5s)", variable=self.auto_refresh_var,
                         command=self.toggle_auto_refresh, width=140).pack(side="left", padx=5)
         
         # Frame de controles de beamforming
@@ -660,7 +660,7 @@ class ModernPatchAntennaDesigner:
         ctk.CTkLabel(header, text="Visualize 3D radiation characteristics", 
                     font=ctk.CTkFont(size=13), text_color=("gray40", "gray60")).grid(row=1, column=0, sticky="w", pady=(2, 0))
         
-        # Área de gráficos
+极速赛车开奖结果记录        # Área de gráficos
         graph_frame = ctk.CTkFrame(main, fg_color=("gray96", "gray14"), corner_radius=10)
         graph_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         graph_frame.grid_columnconfigure(0, weight=1)
@@ -677,7 +677,7 @@ class ModernPatchAntennaDesigner:
         self.ax_3d = self.fig_3d.add_subplot(111, projection='3d')
         
         # Configurar estilo do gráfico 3D
-        self.ax_3d.set_facecolor(face)
+        self.ax_3d极速赛车开奖结果记录_facecolor(face)
         self.ax_3d.tick_params(colors=text_color)
         self.ax_3d.title.set_color(text_color)
         
@@ -704,7 +704,7 @@ class ModernPatchAntennaDesigner:
         header.grid_columnconfigure(0, weight=1)
         
         ctk.CTkLabel(header, text="Design Optimization", 
-                    font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, sticky="w")
+                    font=ctk.CTkFont(size=20, weight="bold")).grid(row=极速赛车开奖结果记录, column=0, sticky="w")
         
         ctk.CTkLabel(header, text="Automatically optimize design based on simulation results", 
                     font=ctk.CTkFont(size=13), text_color=("gray40", "gray60")).grid(row=1, column=0, sticky="w", pady=(2, 0))
@@ -722,8 +722,8 @@ class ModernPatchAntennaDesigner:
         self.opt_status_label.grid(row=0, column=0, padx=15, pady=12)
         
         # Botões de otimização
-        btn_frame = ctk.CTkFrame(sec_opt, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=15)
+        btn_frame = ctk.CTk极速赛车开奖结果记录(sec_opt, fg_color="transparent")
+        btn_frame.grid(row=3, column=极速赛车开奖结果记录, sticky="ew", padx=15, pady=15)
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
         btn_frame.grid_columnconfigure(2, weight=1)
@@ -744,8 +744,8 @@ class ModernPatchAntennaDesigner:
         sec_history = self.create_section(main, "Optimization History", "Track design changes", 2, 0)
         
         # Treeview para histórico (placeholder)
-        history_frame = ctk.CTkFrame(sec_history, fg_color=("gray92", "gray18"), corner_radius=8)
-        history_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=15)
+        history_frame = ctk.CTkFrame(sec_history, fg_color=("gray92", "极速赛车开奖结果记录"), corner_radius=8)
+        history_frame.grid(row=2, column=0, sticky="nsew", padx=15, p极速赛车开奖结果记录=15)
         history_frame.grid_columnconfigure(0, weight=1)
         history_frame.grid_rowconfigure(0, weight=1)
         
@@ -769,7 +769,7 @@ class ModernPatchAntennaDesigner:
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         header.grid_columnconfigure(0, weight=1)
         
-        ctk.CTkLabel(header, text="Simulation Log", 
+        ctk.C极速赛车开奖结果记录Label(header, text="Simulation Log", 
                     font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, sticky="w")
         
         ctk.CTkLabel(header, text="View detailed simulation messages and events", 
@@ -785,7 +785,7 @@ class ModernPatchAntennaDesigner:
                                       font=ctk.CTkFont(family="Consolas", size=12),
                                       fg_color=("gray98", "gray10"), text_color=("gray20", "gray80"))
         self.log_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.log_text.insert("1.0", "Log started at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        self.log_text.insert("1.极速赛车开奖结果记录", "Log started at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
         
         # Botões de ação
         btn_frame = ctk.CTkFrame(main, fg_color="transparent")
@@ -876,7 +876,7 @@ class ModernPatchAntennaDesigner:
         tree.heading("iteration", text="Iteration")
         tree.heading("resonant_freq", text="Resonant Freq (GHz)")
         tree.heading("target_freq", text="Target Freq (GHz)")
-        tree.heading("error_percent", text="Error (%)")
+        tree.heading("error_per极速赛车开奖结果记录", text="Error (%)")
         tree.heading("min_s11", text="Min S11 (dB)")
         tree.heading("scaling_factor", text="Scaling Factor")
         
@@ -921,7 +921,7 @@ class ModernPatchAntennaDesigner:
             "ready": ("gray85", "gray25"),
             "running": ("#FFA500", "#CC8400"),
             "success": ("#2E8B57", "#3CB371"),
-            "error": ("#DC143C", "#FF4500")
+            "error": ("#DC143极速赛车开奖结果记录", "#FF4500")
         }
         
         if color and color in colors:
@@ -930,7 +930,7 @@ class ModernPatchAntennaDesigner:
 
     # ------------- Utilidades de Log -------------
     def log_message(self, message: str):
-        """Enfileira uma mensagem para o textbox de log com carimbo de hora."""
+        """Enfileira uma mensagem para o textbox de log with timestamp."""
         self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
 
     def process_log_queue(self):
@@ -1005,7 +1005,7 @@ class ModernPatchAntennaDesigner:
                              "coax_port_length", "antipad_clearance", "feed_rel_x",
                              "sweep_step", "theta_step", "phi_step"]:
                     if isinstance(widget, ctk.CTkEntry):
-                        self.params[key] = float(widget.get())
+                        self.params[key极速赛车开奖结果记录 = float(widget.get())
                 elif key in ["spacing_type", "substrate_material", "feed_position", "sweep_type"]:
                     self.params[key] = widget.get()
                 else:
@@ -1038,7 +1038,7 @@ class ModernPatchAntennaDesigner:
         G_des = float(self.params["gain"])
         N_req = max(1, int(math.ceil(10 ** ((G_des - G_elem) / 10.0))))
         if N_req % 2 == 1:
-            N_req += 1
+            N极速赛车开奖结果记录 += 1
         rows = max(2, int(round(math.sqrt(N_req))));  rows += rows % 2
         cols = max(2, int(math.ceil(N_req / rows))); cols += cols % 2
         while rows * cols < N_req:
@@ -1104,7 +1104,7 @@ class ModernPatchAntennaDesigner:
         """Garante a existência de um material com εr and tanδ informados."""
         try:
             if not self.hfss.materials.checkifmaterialexists(name):
-                self.hfss.materials.add_material(name)
+                self.h极速赛车开奖结果记录.materials.add_material(name)
                 m = self.hfss.materials.material_keys[name]
                 m.permittivity = er; m.dielectric_loss_tangent = tan_d
                 self.log_message(f"Created material: {name} (er={er}, tanδ={tan_d})")
@@ -1137,7 +1137,7 @@ class ModernPatchAntennaDesigner:
         self.hfss["a"] = f"{a}mm"; self.hfss["b"] = f"{b}mm"; self.hfss["wall"] = f"{wall}mm"
         self.hfss["Lp"] = f"{Lp}mm"; self.hfss["clear"] = f"{clear}mm"; self.hfss["eps"] = "0.001mm"
         self.hfss["padAir"] = f"{max(spacing, W, L)/2 + Lp + 2.0}mm"
-        self.log_message(f"Air coax set: a={a:.3f} mm, b={b:.3f} mm (b/a={ba:.3f}≈2.3 → ~50 Ω)")
+        self.log_message(f"Air coax set: a={a:.3极速赛车开奖结果记录} mm, b={b:.3f} mm (b/a={ba:.3f}≈2.3 → ~50 Ω)")
         return a, b, wall, Lp, clear
 
     def _create_coax_feed_lumped(self, ground, substrate, x_feed: float, y_feed: float, name_prefix: str):
@@ -1155,7 +1155,7 @@ class ModernPatchAntennaDesigner:
             pin = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
                                                     a_val, h_sub_val + Lp_val + 0.001,
                                                     name=f"{name_prefix}_Pin", material="copper")
-            shield_outer = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
+            shield_outer = self.hfss.modeler.create_cylinder("Z", [极速赛车开奖结果记录_feed, y_feed, -Lp_val],
                                                              b_val + wall_val, Lp_val,
                                                              name=f"{name_prefix}_ShieldOuter", material="copper")
             shield_inner_void = self.hfss.modeler.create_cylinder("Z", [x_feed, y_feed, -Lp_val],
@@ -1170,7 +1170,7 @@ class ModernPatchAntennaDesigner:
                                                      name=f"{name_prefix}_GndHole", material="vacuum")
             self.hfss.modeler.subtract(ground, [g_hole], keep_originals=False)
 
-            port_ring = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, -Lp_val], b_val,
+            port_ring = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, -L极速赛车开奖结果记录], b_val,
                                                         name=f"{name_prefix}_PortRing", material="vacuum")
             port_hole = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, -Lp_val], a_val,
                                                         name=f"{name_prefix}_PortHole", material="vacuum")
@@ -1179,676 +1179,4 @@ class ModernPatchAntennaDesigner:
             eps_line = min(0.1 * (b_val - a_val), 0.05)
             r_start = a_val + eps_line; r_end = b_val - eps_line
             if r_end <= r_start:
-                r_end = a_val + 0.75 * (b_val - a_val)
-            p1 = [x_feed + r_start, y_feed, -Lp_val]; p2 = [x_feed + r_end, y_feed, -Lp_val]
-
-            self.hfss.lumped_port(assignment=port_ring.name, integration_line=[p1, p2],
-                                  impedance=50.0, name=f"{name_prefix}_Lumped", renormalize=True)
-            if f"{name_prefix}_Lumped" not in self.created_ports:
-                self.created_ports.append(f"{name_prefix}_Lumped")
-            self.log_message(f"Lumped Port '{name_prefix}_Lumped' created (integration line).")
-            return pin, None, shield_outer
-        except Exception as e:
-            self.log_message(f"Exception in coax creation '{name_prefix}': {e}\nTraceback: {traceback.format_exc()}")
-            return None, None, None
-
-    # ---------- Pós-solve helpers ----------
-    def _add_or_set_post_var(self, name: str, value: str) -> bool:
-        """Tenta atualizar variável de pós-processamento; se não existir, cria."""
-        try:
-            # Primeiro tenta verificar se a variável já existe
-            try:
-                existing_vars = self.hfss.odesign.GetVariables()
-                if name in existing_vars:
-                    # Variável existe, vamos atualizá-la
-                    self.hfss.odesign.ChangeProperty(
-                        [
-                            "NAME:AllTabs",
-                            [
-                                "NAME:LocalVariableTab",
-                                ["NAME:PropServers", "LocalVariables"],
-                                ["NAME:ChangedProps", ["NAME:" + name, "Value:=", value]]
-                            ]
-                        ]
-                    )
-                    self.log_message(f"Post var '{name}' updated to {value}.")
-                    return True
-            except:
-                pass
-            
-            # Se não existe, cria uma nova
-            self.hfss.odesign.ChangeProperty(
-                [
-                    "NAME:AllTabs",
-                    [
-                        "NAME:LocalVariableTab",
-                        ["NAME:PropServers", "LocalVariables"],
-                        ["NAME:NewProps", ["NAME:" + name, "PropType:=", "VariableProp", "UserDef:=", True, "Value:=", value]]
-                    ]
-                ]
-            )
-            self.log_message(f"Post var '{name}' created = {value}.")
-            return True
-        except Exception as e:
-            self.log_message(f"Add/Set post var '{name}' failed: {e}")
-            return False
-
-    def _edit_sources_with_vars(self, excitations: List[str], pvars: List[str], phvars: List[str]) -> bool:
-        """Chama Solutions.EditSources ligando cada excitação a p_i (magnitude) e ph_i (fase)."""
-        try:
-            sol = self.hfss.odesign.GetModule("Solutions")
-            header = ["IncludePortPostProcessing:=", False, "SpecifySystemPower:=", False]
-            cmd = [header]
-            for ex, p, ph in zip(excitations, pvars, phvars):
-                cmd.append(["Name:=", ex, "Magnitude:=", p, "Phase:=", ph])
-            sol.EditSources(cmd)
-            self.log_message(f"Solutions.EditSources applied to {len(excitations)} port(s).")
-            return True
-        except Exception as e:
-            self.log_message(f"EditSources failed: {e}")
-            return False
-
-    def _ensure_infinite_sphere(self, name="Infinite Sphere1") -> Optional[str]:
-        """Cria (ou recria) Infinite Sphere com amostragem 1° x 1°."""
-        try:
-            rf = self.hfss.odesign.GetModule("RadField")
-            # remove duplicata se já houver com mesmo nome
-            try:
-                setups = list(rf.GetSetups())
-                if name in setups:
-                    rf.DeleteSetup(name)
-            except Exception:
-                pass
-            props = [f"NAME:{name}",
-                     "UseCustomRadiationSurface:=", False,
-                     "CSDefinition:=", "Theta-Phi",
-                     "Polarization:=", "Linear",
-                     "ThetaStart:=", "-180deg", "ThetaStop:=", "180deg", "ThetaStep:=", "1deg",
-                     "PhiStart:=", "-180deg", "PhiStop:=", "180deg", "PhiStep:=", "1deg",
-                     "UseLocalCS:=", False]
-            rf.InsertInfiniteSphereSetup(props)
-            self.log_message(f"Infinite sphere '{name}' created.")
-            return name
-        except Exception as e:
-            self.log_message(f"Infinite sphere creation failed: {e}")
-            return None
-
-    def _postprocess_after_solve(self):
-        """Cria p_i/ph_i e aplica em EditSources; popula UI de fontes."""
-        try:
-            exs = self._list_excitations()
-            if not exs:
-                self.log_message("No excitations found for post-processing.")
-                return
-                
-            pvars, phvars = [], []
-            for i in range(1, len(exs) + 1):
-                p = f"p{i}"; ph = f"ph{i}"
-                # Criar variáveis como variáveis de projeto (não de pós-processamento)
-                self._add_or_set_post_var(p, "1W")
-                self._add_or_set_post_var(ph, "0deg")
-                pvars.append(p)
-                phvars.append(ph)
-                
-            # Aplicar as fontes
-            self._edit_sources_with_vars(exs, pvars, phvars)
-            
-            # Construir painel de fontes na UI
-            self.populate_source_controls(exs)
-        except Exception as e:
-            self.log_message(f"Postprocess-after-solve error: {e}\n{traceback.format_exc()}")
-
-    # ------------- Helpers de solução -------------
-    def _fetch_solution(self, expression: str, setup_candidates: Optional[List[str]] = None, **kwargs):
-        """Wrapper robusto para post.get_solution_data tentando diferentes nomes de setup/sweep."""
-        if setup_candidates is None:
-            setup_candidates = ["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive", "Setup1:LastAdaptive"]
-        last_err = None
-        for setup in setup_candidates:
-            try:
-                sd = self.hfss.post.get_solution_data(expressions=[expression], setup_sweep_name=setup, **kwargs)
-                if sd and hasattr(sd, "primary_sweep_values"):
-                    return sd
-            except Exception as e:
-                last_err = e
-        if last_err:
-            self.log_message(f"get_solution_data failed for '{expression}': {last_err}")
-        return None
-
-    def _shape_series(self, data_obj, npoints: int) -> np.ndarray:
-        """Converte retorno de data_real() em ndarray 1D com tamanho esperado."""
-        if isinstance(data_obj, (list, tuple)):
-            if len(data_obj) == 0:
-                return np.array([], dtype=float)
-            if hasattr(data_obj[0], "__len__"):
-                arr = np.asarray(data_obj[0], dtype=float)
-            else:
-                arr = np.asarray(data_obj, dtype=float)
-        else:
-            arr = np.asarray(data_obj, dtype=float)
-        arr = np.atleast_1d(arr).astype(float)
-        if npoints > 0 and arr.size not in (1, npoints):
-            return np.array([], dtype=float)
-        return arr
-
-    def _list_excitations(self) -> List[str]:
-        """Obtém nomes das excitações da simulação; ordena por índice Pn quando possível."""
-        names = []
-        try:
-            names = self.hfss.get_excitations_name() or []
-        except Exception:
-            names = []
-        if not names and self.created_ports:
-            names = [f"{p}:1" for p in self.created_ports]
-
-        def keyfn(s: str) -> int:
-            m = re.search(r"P(\d+)_Lumped", s)
-            return int(m.group(1)) if m else 1_000_000
-
-        names.sort(key=keyfn)
-        return names
-
-    # ------------- Far Field (cuts & 3D) -------------
-    def _get_gain_cut(self, frequency: float, cut: str, fixed_angle_deg: float):
-        """Retorna (ângulo, ganho_dB) para corte Theta ou Phi em frequency GHz."""
-        try:
-            expr = "dB(GainTotal)"
-            if cut.lower() == "theta":
-                variations = {"Freq": f"{frequency}GHz", "Theta": "All", "Phi": f"{fixed_angle_deg}deg"}
-                prim = "Theta"
-            else:
-                variations = {"Freq": f"{frequency}GHz", "Theta": f"{fixed_angle_deg}deg", "Phi": "All"}
-                prim = "Phi"
-            sd = self._fetch_solution(expr, primary_sweep_variable=prim, variations=variations, context="Infinite Sphere1")
-            if not sd or not hasattr(sd, "primary_sweep_values"):
-                return None, None
-            ang = np.asarray(sd.primary_sweep_values, dtype=float)
-            gains = self._shape_series(sd.data_real(), ang.size)
-            if gains.size == ang.size and gains.size > 0:
-                return ang, gains
-            return None, None
-        except Exception as e:
-            self.log_message(f"Error getting {cut} cut: {e}")
-            return None, None
-
-    def _get_gain_3d_grid(self, frequency: float, theta_step=10.0, phi_step=10.0):
-        """Varre Phi (fixo) e pega Theta = All para montar grade 3D normalizada."""
-        try:
-            phi_vals = np.arange(-180.0, 180.0 + phi_step, phi_step)
-            TH_list, G_list = None, []
-            for phi in phi_vals:
-                sd = self._fetch_solution(
-                    "dB(GainTotal)",
-                    primary_sweep_variable="Theta",
-                    variations={"Freq": f"{frequency}GHz", "Theta": "All", "Phi": f"{phi}deg"},
-                    context="Infinite Sphere1"
-                )
-                if not sd or not hasattr(sd, "primary_sweep_values"):
-                    continue
-                th = np.asarray(sd.primary_sweep_values, dtype=float)
-                g = self._shape_series(sd.data_real(), th.size)
-                if g.size != th.size or g.size == 0:
-                    continue
-                if TH_list is None:
-                    TH_list = th
-                else:
-                    if th.size != TH_list.size:
-                        # ignora phi com vetor de theta inconsistente
-                        continue
-                G_list.append(g)
-            if TH_list is None or len(G_list) == 0:
-                return None
-            G = np.vstack(G_list).T  # shape (Ntheta, Nphi)
-            PH = phi_vals[:G.shape[1]]
-            TH = TH_list
-            return TH, PH, G
-        except Exception as e:
-            self.log_message(f"3D grid error: {e}")
-            return None
-
-    # ------------- Otimização de Ressonância S11 -------------
-    def analyze_and_optimize(self):
-        """Analisa a ressonância S11 e otimiza a geometria se necessário."""
-        if self.last_s11_analysis is None:
-            self.log_message("No S11 data available for optimization")
-            messagebox.showerror("Error", "No S11 data available. Please run a simulation first.")
-            return
-            
-        try:
-            # Obter dados da análise S11
-            f = self.last_s11_analysis["f"]
-            s11_db = self.last_s11_analysis["s11_db"]
-            f_res = self.last_s11_analysis["f_res"]
-            target_freq = self.params["frequency"]
-            
-            # Calcular erro percentual
-            error_percent = abs(f_res - target_freq) / target_freq * 100
-            
-            # Mensagem de análise detalhada
-            analysis_msg = f"Frequency Analysis Results:\n\n"
-            analysis_msg += f"Target Frequency: {target_freq:.3f} GHz\n"
-            analysis_msg += f"Measured Resonance: {f_res:.3f} GHz\n"
-            analysis_msg += f"Frequency Error: {error_percent:.1f}%\n"
-            analysis_msg += f"Minimum S11: {min(s11_db):.2f} dB\n\n"
-            
-            if error_percent < 2:  # Menos de 2% de erro
-                analysis_msg += "✅ Design is within acceptable tolerance (≤2% error)."
-                messagebox.showinfo("Frequency Analysis", analysis_msg)
-                return
-                
-            # Calcular fator de ajuste
-            scaling_factor = target_freq / f_res
-            
-            if scaling_factor < 1:
-                size_change = "decrease"
-                freq_direction = "increase"
-            else:
-                size_change = "increase"
-                freq_direction = "decrease"
-            
-            analysis_msg += f"Recommended adjustment: {size_change} size by factor {scaling_factor:.3f}\n"
-            analysis_msg += f"to {freq_direction} resonant frequency toward target."
-            
-            # Perguntar ao usuário se deseja otimizar
-            response = messagebox.askyesno("Frequency Optimization", 
-                                          analysis_msg + "\n\nWould you like to optimize the design?")
-            
-            if not response:
-                return
-                
-            # Armazenar parâmetros originais para comparação se esta for a primeira otimização
-            if not self.optimized:
-                self.original_params = self.calculated_params.copy()
-                self.optimization_history = []
-            
-            # Registrar esta etapa de otimização
-            optimization_step = {
-                "iteration": len(self.optimization_history) + 1,
-                "resonant_freq": f_res,
-                "target_freq": target_freq,
-                "error_percent": error_percent,
-                "min_s11": min(s11_db),
-                "scaling_factor": scaling_factor,
-                "size_change": size_change
-            }
-            self.optimization_history.append(optimization_step)
-            
-            self.log_message(f"Optimizing design with scaling factor: {scaling_factor:.4f}")
-            self.log_message(f"Size change: {size_change}")
-            
-            # Aplicar scaling a todas as dimensões
-            dimension_keys = ["patch_length", "patch_width", "spacing", "feed_offset", 
-                             "substrate_width", "substrate_length"]
-            
-            for key in dimension_keys:
-                self.calculated_params[key] *= scaling_factor
-                
-            # Atualizar comprimento de onda guiado
-            self.calculated_params["lambda_g"] *= scaling_factor
-                
-            # Atualizar UI com novas dimensões
-            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
-            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
-            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
-            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
-            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
-            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
-            self.substrate_dims_label.configure(
-                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
-            
-            # Definir flag otimizada
-            self.optimized = True
-            self.opt_status_label.configure(text=f"Optimized - Iteration {len(self.optimization_history)}")
-            
-            # Perguntar se o usuário deseja executar a simulação com as novas dimensões
-            response = messagebox.askyesno("Run Optimization", 
-                                          "Design parameters have been adjusted. Would you like to run the simulation with the optimized dimensions?")
-            
-            if response:
-                self.run_simulation()
-                
-        except Exception as e:
-            self.log_message(f"Error in frequency optimization: {e}")
-            self.log_message(f"Traceback: {traceback.format_exc()}")
-            messagebox.showerror("Error", f"Optimization failed: {e}")
-            self.update_quick_status("Error", "error")
-
-    def reset_to_original(self):
-        """Redefine o design para os parâmetros originais."""
-        if not self.optimized:
-            messagebox.showinfo("Reset", "Design is already at original parameters.")
-            return
-            
-        response = messagebox.askyesno("Reset Design", 
-                                      "Are you sure you want to reset all parameters to their original values?")
-        
-        if response:
-            # Restaurar parâmetros originais
-            for key in self.original_params:
-                self.calculated_params[key] = self.original_params[key]
-                
-            # Atualizar UI
-            self.patches_label.configure(text=f"Number of Patches: {self.calculated_params['num_patches']}")
-            self.rows_cols_label.configure(text=f"Configuration: {self.calculated_params['rows']} x {self.calculated_params['cols']}")
-            self.spacing_label.configure(text=f"Spacing: {self.calculated_params['spacing']:.2f} mm ({self.params['spacing_type']})")
-            self.dimensions_label.configure(text=f"Patch Dimensions: {self.calculated_params['patch_length']:.2f} x {self.calculated_params['patch_width']:.2f} mm")
-            self.lambda_label.configure(text=f"Guided Wavelength: {self.calculated_params['lambda_g']:.2f} mm")
-            self.feed_offset_label.configure(text=f"Feed Offset (y): {self.calculated_params['feed_offset']:.2f} mm")
-            self.substrate_dims_label.configure(
-                text=f"Substrate Dimensions: {self.calculated_params['substrate_width']:.2f} x {self.calculated_params['substrate_length']:.2f} mm")
-            
-            # Redefinir flags
-            self.optimized = False
-            self.optimization_history = []
-            self.opt_status_label.configure(text="No optimization performed yet")
-            
-            self.log_message("Design reset to original parameters")
-            messagebox.showinfo("Reset Complete", "Design parameters have been reset to their original values.")
-
-    # ------------- Simulação -------------
-    def _run_simulation_thread(self):
-        """Executa a simulação em uma thread separada para não travar a GUI."""
-        try:
-            self.log_message("Starting simulation thread")
-            if not self.get_parameters():
-                self.log_message("Invalid parameters. Aborting.")
-                return
-            if self.calculated_params["num_patches"] < 1:
-                self.calculate_parameters()
-
-            self._open_or_create_project()
-
-            self.hfss.modeler.model_units = "mm"
-            self.log_message("Model units set to: mm")
-
-            sub_name = self.params["substrate_material"]
-            if not self.hfss.materials.checkifmaterialexists(sub_name):
-                sub_name = "Custom_Substrate"
-                self._ensure_material(sub_name, float(self.params["er"]), float(self.params["tan_d"]))
-
-            L = float(self.calculated_params["patch_length"])
-            W = float(self.calculated_params["patch_width"])
-            spacing = float(self.calculated_params["spacing"])
-            rows = int(self.calculated_params["rows"])
-            cols = int(self.calculated_params["cols"])
-            h_sub = float(self.params["substrate_thickness"])
-            sub_w = float(self.calculated_params["substrate_width"])
-            sub_l = float(self.calculated_params["substrate_length"])
-
-            self._set_design_variables(L, W, spacing, rows, cols, h_sub, sub_w, sub_l)
-            self.created_ports.clear()
-
-            self.log_message("Creating substrate")
-            substrate = self.hfss.modeler.create_box(["-subW/2", "-subL/2", 0], ["subW", "subL", "h_sub"], "Substrate", sub_name)
-            self.log_message("Creating ground plane")
-            ground = self.hfss.modeler.create_rectangle("XY", ["-subW/2", "-subL/2", 0], ["subW", "subL"], "Ground", "copper")
-
-            self.log_message(f"Creating {rows*cols} patches in {rows}x{cols} configuration")
-            patches = []
-            total_w = cols * W + (cols - 1) * spacing
-            total_l = rows * L + (rows - 1) * spacing
-            start_x = -total_w / 2 + W / 2
-            start_y = -total_l / 2 + L / 2
-
-            count = 0
-            for r in range(rows):
-                for c in range(cols):
-                    count += 1
-                    patch_name = f"Patch_{count}"
-                    cx = start_x + c * (W + spacing)
-                    cy = start_y + r * (L + spacing)
-                    origin = [cx - W / 2, cy - L / 2, "h_sub"]
-                    self.log_message(f"Creating patch {count} at ({r}, {c})")
-                    patch = self.hfss.modeler.create_rectangle("XY", origin, ["patchW", "patchL"], patch_name, "copper")
-                    patches.append(patch)
-
-                    if self.params["feed_position"] == "edge":
-                        y_feed = cy - 0.5 * L + 0.02 * L
-                    else:
-                        y_feed = cy - 0.5 * L + 0.30 * L
-                    relx = float(self.params["feed_rel_x"])
-                    relx = min(max(relx, 0.0), 1.0)
-                    x_feed = cx - 0.5 * W + relx * W
-
-                    # Evitar criar pad com nome inválido
-                    pad_name = f"{patch_name}_Pad"
-                    pad_name = pad_name.replace(" ", "_")  # Garantir nome válido
-                    pad = self.hfss.modeler.create_circle("XY", [x_feed, y_feed, "h_sub"], "a", pad_name, "copper")
-                    
-                    try:
-                        self.hfss.modeler.unite([patch, pad])
-                    except Exception as e:
-                        self.log_message(f"Warning: Could not unite patch and pad: {e}")
-                        # Continua mesmo sem unir
-
-                    self._create_coax_feed_lumped(ground=ground, substrate=substrate, x_feed=x_feed, y_feed=y_feed, name_prefix=f"P{count}")
-
-            try:
-                names = [ground.name] + [p.name for p in patches]
-                self.hfss.assign_perfecte_to_sheets(names)
-                self.log_message(f"PerfectE assigned to: {names}")
-            except Exception as e:
-                self.log_message(f"PerfectE assignment warning: {e}")
-
-            self.log_message("Creating air region + radiation boundary")
-            lambda0_mm = self.c / (self.params["sweep_start"] * 1e9) * 1000.0
-            pad_mm = float(lambda0_mm) / 4.0
-            region = self.hfss.modeler.create_region([pad_mm]*6, is_percentage=False)
-            self.hfss.assign_radiation_boundary_to_objects(region)
-
-            # Esfera antes do solve (para ter far-field)
-            self._ensure_infinite_sphere("Infinite Sphere1")
-
-            # Setup
-            self.log_message("Creating simulation setup")
-            setup = self.hfss.create_setup(name="Setup1", setup_type="HFSSDriven")
-            setup.props["Frequency"] = f"{self.params['frequency']}GHz"
-            setup.props["MaxDeltaS"] = 0.02
-            try:
-                setup.props["SaveFields"] = False
-                setup.props["SaveRadFields"] = True
-            except Exception:
-                pass
-
-            self.log_message(f"Creating frequency sweep: {self.params['sweep_type']}")
-            stype = self.params["sweep_type"]
-            try:
-                try:
-                    sw = setup.get_sweep("Sweep1")
-                    if sw:
-                        sw.delete()
-                except Exception:
-                    pass
-                if stype == "Discrete":
-                    step = float(self.params["sweep_step"])
-                    setup.create_linear_step_sweep(unit="GHz", start_frequency=self.params["sweep_start"],
-                                                   stop_frequency=self.params["sweep_stop"], step_size=step, name="Sweep1")
-                elif stype == "Fast":
-                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
-                                                 start_frequency=self.params["sweep_start"],
-                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Fast")
-                else:
-                    setup.create_frequency_sweep(unit="GHz", name="Sweep1",
-                                                 start_frequency=self.params["sweep_start"],
-                                                 stop_frequency=self.params["sweep_stop"], sweep_type="Interpolating")
-            except Exception as e:
-                self.log_message(f"Sweep creation warning: {e}")
-
-            exs = self._list_excitations()
-            self.log_message(f"Excitations created: {len(exs)} -> {exs}")
-
-            self.log_message("Validating design")
-            try:
-                _ = self.hfss.validate_full_design()
-            except Exception as e:
-                self.log_message(f"Validation warning: {e}")
-
-            self.log_message("Starting analysis")
-            if self.save_project:
-                self.hfss.save_project()
-                
-            # Usar análise assíncrona com timeout
-            analysis_success = self.hfss.analyze_setup("Setup1", cores=self.params["cores"])
-            
-            if not analysis_success:
-                self.log_message("Analysis failed or timed out")
-                self.sim_status_label.configure(text="Simulation failed")
-                self.update_quick_status("Error", "error")
-                return
-
-            # Aguardar um pouco para garantir que os dados estejam disponíveis
-            time.sleep(2)
-
-            self._postprocess_after_solve()
-            self.log_message("Processing results")
-            
-            # Atualizar a interface na thread principal
-            self.window.after(0, self._update_after_simulation)
-            
-        except Exception as e:
-            self.log_message(f"Error in simulation: {e}\nTraceback: {traceback.format_exc()}")
-            self.sim_status_label.configure(text=f"Simulation error: {e}")
-            self.update_quick_status("Error", "error")
-        finally:
-            self.simulation_running = False
-            self.run_button.configure(state="normal")
-
-    def _update_after_simulation(self):
-        """Atualiza a interface após a simulação ser concluída."""
-        try:
-            self.analyze_and_mark_s11()     # também redesenha cortes
-            self.refresh_patterns_only()    # inclui 3D
-            self.sim_status_label.configure(text="Simulation completed")
-            self.log_message("Simulation completed successfully")
-            self.update_quick_status("Success", "success")
-        except Exception as e:
-            self.log_message(f"Error updating after simulation: {e}")
-
-    def run_simulation(self):
-        """Inicia a simulação em uma thread separada."""
-        if self.simulation_running:
-            self.log_message("Simulation is already running")
-            return
-            
-        self.simulation_running = True
-        self.run_button.configure(state="disabled")
-        self.sim_status_label.configure(text="Simulation in progress")
-        self.update_quick_status("Running...", "running")
-        
-        # Executar a simulação em uma thread separada
-        self.simulation_thread = threading.Thread(target=self._run_simulation_thread)
-        self.simulation_thread.daemon = True
-        self.simulation_thread.start()
-
-    # ------------- S11 / VSWR / |Z| -------------
-    def _get_s11_curves(self):
-        """Obtém f, S11(dB) and (opcional) re/im de S11 para cálculo de Z."""
-        exs = self._list_excitations()
-        if not exs:
-            return None
-        port_name = exs[0].split(":")[0]
-
-        # tentar por nome (compatível com portas nomeadas)
-        for expr_tpl in [f"( {port_name},{port_name} )", f"({port_name},{port_name})"]:
-            sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
-            if sd_db and hasattr(sd_db, "primary_sweep_values"):
-                f = np.asarray(sd_db.primary_sweep_values, dtype=float)
-                y_db = self._shape_series(sd_db.data_real(), f.size)
-                if y_db.size == f.size and f.size > 0:
-                    sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
-                    sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
-                    reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
-                    imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
-                    return f, y_db, reS, imS
-
-        # fallback por índice
-        expr_tpl = "(1,1)"
-        sd_db = self._fetch_solution(f"dB(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1", "Setup1 : LastAdaptive"])
-        if not sd_db:
-            return None
-        f = np.asarray(sd_db.primary_sweep_values, dtype=float)
-        y_db = self._shape_series(sd_db.data_real(), f.size)
-        sd_re = self._fetch_solution(f"re(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
-        sd_im = self._fetch_solution(f"im(S{expr_tpl})", setup_candidates=["Setup1 : Sweep1", "Setup1:Sweep1"])
-        reS = self._shape_series(sd_re.data_real(), f.size) if sd_re else None
-        imS = self._shape_series(sd_im.data_real(), f.size) if sd_im else None
-        return f, y_db, reS, imS
-
-    def analyze_and_mark_s11(self):
-        """Plota S11 e VSWR; estima Z=50*(1+S)/(1-S) no mínimo de S11, se possível."""
-        try:
-            # Limpa S11/Imp
-            self.ax_s11.clear(); self.ax_imp.clear()
-
-            data = self._get_s11_curves()
-            if not data:
-                self.log_message("Solution Data failed to load. Check solution, context or expression.")
-                self.canvas_s11.draw(); return
-            f, s11_db, reS, imS = data
-            if f.size == 0 or s11_db.size == 0:
-                self.log_message("S11 analysis aborted: empty curve.")
-                self.canvas_s11.draw(); return
-
-            # S11 dB
-            # Plotar dados originais se disponíveis
-            if hasattr(self, 'original_s11_data') and self.original_s11_data is not None:
-                orig_f, orig_s11 = self.original_s11_data
-                self.ax_s11.plot(orig_f, orig_s11, '--', label='Original', linewidth=2, alpha=0.7)
-            
-            # Plotar dados atuais
-            label = 'Optimized' if self.optimized else 'Simulated'
-            if self.optimized and len(self.optimization_history) > 0:
-                label += f' (Iteration {len(self.optimization_history)})'
-            
-            self.ax_s11.plot(f, s11_db, linewidth=2, label=label)
-            self.ax_s11.axhline(y=-10, linestyle='--', alpha=0.7, label='-10 dB')
-            self.ax_s11.set_xlabel("Frequency (GHz)")
-            self.ax_s11.set_ylabel("S11 (dB)")
-            
-            title = "S11 & VSWR"
-            if self.optimized:
-                title += f" (Optimized - Iteration {len(self.optimization_history)})"
-            self.ax_s11.set_title(title)
-            
-            self.ax_s11.legend()
-            self.ax_s11.grid(True, alpha=0.5)
-
-            # VSWR via |S|
-            s_abs = 10 ** (s11_db / 20.0)
-            s_abs = np.clip(s_abs, 0, 0.999999)
-            vswr = (1 + s_abs) / (1 - s_abs)
-            ax_v = self.ax_s11.twinx()
-            ax_v.plot(f, vswr, linestyle='--', alpha=0.8, label='VSWR')
-            ax_v.set_ylabel("VSWR")
-
-            # mínimo de S11
-            idx_min = int(np.argmin(s11_db))
-            f_res = float(f[idx_min]); s11_min_db = float(s11_db[idx_min])
-            self.ax_s11.scatter([f_res], [s11_min_db], s=45, marker="o", zorder=5)
-            self.ax_s11.annotate(f"f_res={f_res:.4g} GHz\nS11={s11_min_db:.2f} dB",
-                                 (f_res, s11_min_db), textcoords="offset points", xytext=(8, -16))
-            cf = float(self.params["frequency"])
-            self.ax_s11.axvline(x=cf, linestyle=':', alpha=0.7, color='r', label=f"f0={cf:g} GHz")
-
-            # Impedância |Z|
-            Zmag = None; R = X = None
-            if reS is not None and imS is not None and reS.size == imS.size == f.size:
-                S = reS + 1j*imS
-                Z0 = 50.0
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    Z = Z0 * (1 + S) / (1 - S)
-                Zmag = np.abs(Z)
-                self.ax_imp.plot(f, Zmag, linewidth=2)
-                self.ax_imp.set_xlabel("Frequency (GHz)")
-                self.ax_imp.set_ylabel("|Z| (Ω)")
-                self.ax_imp.set_title("Input Impedance Magnitude")
-                self.ax_imp.grid(True, alpha=0.5)
-                Zr = Z[idx_min]
-                R = float(np.real(Zr)); X = float(np.imag(Zr))
-
-            # guarda
-            self.last_s11_analysis = {"f": f, "s11_db": s11_db, "vswr": vswr,
-                                      "Zmag": Zmag, "f_res": f_res,
-                                      "R": R, "X": X}
-
-            if R is not
+                r_end = a_val + 0.
